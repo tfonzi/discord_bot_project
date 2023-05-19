@@ -2,13 +2,19 @@ import { ClientOptions, Client, GatewayIntentBits, Interaction, CommandInteracti
 import * as dotenv from "dotenv";
 
 import { Commands } from "./commands";
+import { Chatbot } from "./chat-ai/chat-bot";
 
 interface botToken {
     discordBotToken: string;
 }
 
+interface openAIToken {
+    openAiToken: string;
+}
+
 const clientOptions: ClientOptions = {intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent]};
 const client = new Client(clientOptions);
+let chatBot: Chatbot;
 dotenv.config();
 
 client.on(`ready`, async () => {
@@ -18,9 +24,8 @@ client.on(`ready`, async () => {
 
 client.on(`messageCreate`, async (msg) => {
     if(msg.author.username != client.user.username) {
-        //console.log(`Saw message (${JSON.stringify(msg)})`);
-        if (msg.mentions.has(client.user) && (msg.content.toLowerCase().includes("hi") || msg.content.toLowerCase().includes("hello")))
-        msg.reply(`Hi ${msg.author.username}!`);
+        if (msg.mentions.has(client.user))
+        msg.reply(await chatBot.sendMessage(msg.guildId, (msg.content as string)));
     }
 });
 
@@ -31,7 +36,13 @@ const handleSlashCommand = async (client: Client, interaction: CommandInteractio
         return;
     }
     await interaction.deferReply();
-    slashCommand.run(client, interaction);
+    try {
+        slashCommand.run(client, interaction);
+    } catch(err) {
+        console.error(err);
+        interaction.followUp({ content: "An error has occurred" });
+    }
+    
 };
 
 client.on("interactionCreate", async (interaction: Interaction) => {
@@ -41,9 +52,14 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 })
 
 try {
-    const token: botToken = JSON.parse(process.env.BOT_TOKEN);
-    console.log(`About to log in with ${token.discordBotToken.substring(0,5)}...`);
-    client.login(token.discordBotToken);
+    const discordToken: botToken = JSON.parse(process.env.BOT_TOKEN);
+    const openAIToken: openAIToken = JSON.parse(process.env.OPEN_AI_TOKEN);
+
+    console.log(`Creating chatbot with ${openAIToken.openAiToken.substring(0,5)}...`);
+    chatBot = new Chatbot(openAIToken.openAiToken, "You're name is @DemoBot, and you are a sassy human friend who likes to have conversation and has feelings.")
+
+    console.log(`About to log in with ${discordToken.discordBotToken.substring(0,5)}...`);
+    client.login(discordToken.discordBotToken);
 }
 catch(err) {
     console.error(err);
