@@ -1,68 +1,53 @@
-import { ClientOptions, Client, GatewayIntentBits, Interaction, CommandInteraction} from "discord.js";
+import { ClientOptions, Client, GatewayIntentBits} from "discord.js";
 import * as dotenv from "dotenv";
 
-import { Commands } from "./commands";
+import ready from "./listeners/ready";
+import interactionCreate from "./listeners/interactionCreate";
 import { Chatbot } from "./chat-ai/chat-bot";
 
-interface botToken {
+interface discordBotEnv {
     discordBotToken: string;
-}
-
-interface openAIToken {
     openAiToken: string;
 }
 
 const clientOptions: ClientOptions = {intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent]};
 const client = new Client(clientOptions);
-let chatBot: Chatbot;
 dotenv.config();
 
-client.on(`ready`, async () => {
-    await client.application.commands.set(Commands);
-    console.log(`Logged in as ${client.user.tag}!`);
-});
-
-client.on(`messageCreate`, async (msg) => {
-    if(msg.author.username != client.user.username) {
-        if (msg.mentions.has(client.user))
-        msg.reply(await chatBot.sendMessage(msg.guildId, (msg.content as string)));
-    }
-});
-
-const handleSlashCommand = async (client: Client, interaction: CommandInteraction): Promise<void> => {
-    const slashCommand = Commands.find(c => c.name === interaction.commandName);
-    if (!slashCommand) {
-        interaction.followUp({ content: "An error has occurred" });
-        return;
-    }
-    await interaction.deferReply();
-    try {
-        slashCommand.run(client, interaction);
-    } catch(err) {
-        console.error(err);
-        interaction.followUp({ content: "An error has occurred" });
-    }
-    
-};
-
-client.on("interactionCreate", async (interaction: Interaction) => {
-    if (interaction.isCommand() || interaction.isContextMenuCommand()) {
-        await handleSlashCommand(client, interaction);
-    }
-})
-
 try {
-    const discordToken: botToken = JSON.parse(process.env.BOT_TOKEN);
-    const openAIToken: openAIToken = JSON.parse(process.env.OPEN_AI_TOKEN);
+    if(!process.env.BOT_ENV) {
+        throw Error("No bot env");
+    }
+    const tokens: discordBotEnv = JSON.parse(process.env.BOT_ENV);
+    if(tokens.discordBotToken) {
+        console.log(`Found env var for bot token ${tokens.discordBotToken.substring(0,5)}...`);
+    } else {
+        throw Error("No discord token in env");
+    }
+    if(tokens.openAiToken) {
+        console.log(`Found env var for openai token ${tokens.openAiToken.substring(0,5)}...`);
+    } else {
+        throw Error("No openai token in env");
+    }
 
-    console.log(`Creating chatbot with ${openAIToken.openAiToken.substring(0,5)}...`);
-    chatBot = new Chatbot(openAIToken.openAiToken, "You're name is @DemoBot, and you are a sassy human friend who likes to have conversation and has feelings.")
+    console.log(`Creating chatbot with ${tokens.openAiToken.substring(0,5)}...`);
+    Chatbot.setKey(tokens.openAiToken);
+    Chatbot.setContext(process.env.CONTEXT);
 
-    console.log(`About to log in with ${discordToken.discordBotToken.substring(0,5)}...`);
-    client.login(discordToken.discordBotToken);
+    // registering listeners
+    ready(client);
+    interactionCreate(client);
+
+    console.log(`About to log in with ${tokens.discordBotToken.substring(0,5)}...`);
+    client.login(tokens.discordBotToken);
 }
 catch(err) {
+    //crash hangs-- allows me to enter docker container
+    let ms = 2000;
     console.error(err);
+    while (true) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    }
 }
 
  

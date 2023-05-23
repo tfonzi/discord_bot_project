@@ -1,4 +1,5 @@
 .env
+.context
 node_modules/*
 dist/*
 notes/*
