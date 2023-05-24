@@ -1,8 +1,10 @@
 import { CreateChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionRequestMessageRoleEnum, Configuration, OpenAIApi } from "openai"
 import { encode } from "gpt-3-encoder"
+import { Mutex } from 'async-mutex';
+
+const COLLECT_TIMER = 3000; //collect after 3 second
 
 interface MessageHistory {
-    guildId: string,
     addMessage(message: ChatCompletionRequestMessage),
     getHistory(): ChatCompletionRequestMessage[],
     getTokens(): number
@@ -32,20 +34,96 @@ class MessageHistory implements MessageHistory { // MessageHistory class -- modi
 
 }
 
+interface MessageProcessor {
+    processMessage(msg: string): Promise<string | undefined>
+}
+
+class MessageProcessor implements MessageProcessor { // MessageProcessor class -- Processes messages for chatbot
+    private basket: string[] = [];
+    private isCollecting: boolean;
+    private mutex: Mutex;
+
+    constructor(private history: MessageHistory, private openAi: OpenAIApi) {
+        this.mutex = new Mutex();
+        this.isCollecting = false;
+    }
+
+    async processMessage(msg: string): Promise<string | undefined> {
+        console.log("about to store message into basket");
+        let release = await this.mutex.acquire();
+        try {
+            console.log("storing message into basket - entered mutex");
+            this.basket.push(msg);
+        } finally {
+            release();
+        }
+        console.log("stored message into basket - left mutex");
+        let result = undefined;
+        if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
+            this.isCollecting = true;
+            console.log("starting timer for processing messages");
+            await new Promise(resolve => setTimeout(resolve, COLLECT_TIMER)); // waiting for timer to end
+            console.log("done waiting for timer");
+            release = await this.mutex.acquire();
+            try {
+                console.log("generating response - entered mutex");
+                if (this.basket.length > 0) {
+                    this.basket.forEach(message => {
+                        this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: message});
+                    });
+                    const request: CreateChatCompletionRequest = {
+                        model: "gpt-3.5-turbo",
+                        messages: this.history.getHistory(),
+                        temperature: 1.3,
+                        max_tokens: 250,
+                        presence_penalty: 0.1,
+                        frequency_penalty: -0.2
+                    }
+                    const completion = await this.openAi.createChatCompletion(request);
+                    this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: completion.data.choices[0].message.content});
+                    result = completion.data.choices[0].message.content.replace("Rivanna:", "");
+                    this.basket = []; // refresh basket
+                }
+                
+            } finally {
+                this.isCollecting = false; // refresh collecting state
+                console.log("done generating response - left mutex");
+                release();
+            }
+        } else {
+            console.log("timer has already been started, returning undefined");
+        }
+        console.log(`returning ${result}`);
+        return result;
+        }
+    }
+
 export interface Chatbot {
-    sendMessage(guildId: string, msg: string): Promise<string>,
-    username: string
+    sendMessage(guildId: string, thread: string, msg: string): Promise<string | undefined>,
+    username: string,
+    setChatActiveState(guildId: string, channelId: string, state: boolean): void,
+    getChatActiveState(guildId: string, channelId: string): boolean,
+    isActive(): boolean,
+    setChatTimer(guildId: string, channelId: string, timer: NodeJS.Timeout): void,
+    clearChatTimer(guildId: string, channelId: string): void,
+    getHistory(guildId: string, channelId: string): MessageHistory
 }
 
 export class Chatbot implements Chatbot {
     private static instance: Chatbot;
     private messageHistories: Map<string, MessageHistory>;
+    private activeChats: string[];
+    private activeChatTimers: Map<string, NodeJS.Timeout>;
     private openai: OpenAIApi;
     private context: ChatCompletionRequestMessage;
+    private processers: Map<string, MessageProcessor>
     public userName: string;
 
     private constructor() {
         this.messageHistories = new Map<string, MessageHistory>();
+        this.activeChats = [];
+        this.activeChatTimers = new Map<string, NodeJS.Timeout>();
+        this.processers = new Map<string, MessageProcessor>();
     }
 
     private static EnsureExistance(){
@@ -76,33 +154,67 @@ export class Chatbot implements Chatbot {
         Chatbot.instance.userName = userName;
     }
 
-    async sendMessage(guildId: string, msg: string): Promise<string> {
+    getHistory(guildId: string, channelId: string): MessageHistory {
+        if (this.messageHistories.has(`${guildId}-${channelId}`)) {
+            return this.messageHistories.get(`${guildId}-${channelId}`)
+        } else {
+            throw new Error("There is no history for this chat!")
+        }
+    }
+
+    setChatActiveState(guildId: string, channelId: string, state: boolean) {
+        console.log(`Set ${guildId}-${channelId} to ${state}`);
+        if (state && !this.activeChats.includes(`${guildId}-${channelId}`)) {
+            this.activeChats.push(`${guildId}-${channelId}`);
+        } else if (!state && this.activeChats.includes(`${guildId}-${channelId}`)) {
+            this.activeChats= this.activeChats.filter(x => x !== `${guildId}-${channelId}`);
+            console.log(`new activeChats is: ${this.activeChats}`);
+        }
+    }
+
+    getChatActiveState(guildId: string, channelId: string): boolean { // not great with scale
+        return this.activeChats.includes(`${guildId}-${channelId}`);
+    }
+
+    isActive(): boolean {
+        return this.activeChats.length > 0;
+    }
+
+    setChatTimer(guildId: string, channelId: string, timer: NodeJS.Timeout): void {
+        if (this.activeChatTimers.has(`${guildId}-${channelId}`)) {
+            throw new Error("A timer is already set!")
+        }
+        this.activeChatTimers.set(`${guildId}-${channelId}`, timer );
+    }
+
+    clearChatTimer(guildId: string, channelId: string): void {
+        if (!this.activeChatTimers.has(`${guildId}-${channelId}`)) {
+            throw new Error("There is no timer to clear!")
+        }
+        clearTimeout(this.activeChatTimers.get(`${guildId}-${channelId}`));
+        this.activeChatTimers.delete(`${guildId}-${channelId}`);
+    }
+
+    async sendMessage(guildId: string, channelId: string, msg: string): Promise<string | undefined> {
         try {
             if (!this.context || !this.openai) {
                 throw new Error("Missing Context or OpenAI key!");
             }
-            if (!this.messageHistories.has(guildId)){ // populate new MessageHistory for guild if it does not exist
-                this.messageHistories.set(guildId, new MessageHistory(this.context))
+            if (!this.activeChats.includes(`${guildId}-${channelId}`)) {
+                throw new Error("Cannot send message. Chat in this id is not active.");
             }
-            this.messageHistories.get(guildId).addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: msg});
-            //console.log(this.messageHistories.get(guildId).getTokens());
-            const request: CreateChatCompletionRequest = {
-                model: "gpt-3.5-turbo",
-                messages: this.messageHistories.get(guildId)!.getHistory(), // MessageHistory will always exist due to previous if statement
-                temperature: 1.2,
-                //max_tokens: 200,
-                presence_penalty: 0.1,
-                frequency_penalty: -0.2
+            if (!this.messageHistories.has(`${guildId}-${channelId}`)){ // populate new MessageHistory for channel if it does not exist
+                this.messageHistories.set(`${guildId}-${channelId}`, new MessageHistory(this.context))
             }
-            //console.log(JSON.stringify(request));
-            const completion = await this.openai.createChatCompletion(request);
-
-            this.messageHistories.get(guildId).addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: completion.data.choices[0].message.content});
-            return completion.data.choices[0].message.content.replace("Rivanna:", "");
+            if (!this.processers.has(`${guildId}-${channelId}`)){ // populate new MessageProcessor for channel if it does not exist
+                this.processers.set(`${guildId}-${channelId}`, new MessageProcessor(this.messageHistories.get(`${guildId}-${channelId}`), this.openai));
+            }
+            const chatResult = await this.processers.get(`${guildId}-${channelId}`).processMessage(msg);
+            return chatResult
         }
         catch(err) {
             console.error(err);
-            return "Sorry! I'm having trouble thinking of a response right now. Please try later.";
+            return Promise.resolve("Sorry! I'm having trouble thinking of a response right now. Please try later.");
         }
     }
 }
