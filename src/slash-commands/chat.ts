@@ -2,16 +2,14 @@ import { ApplicationCommandType, Client, CommandInteraction, Message, TextChanne
 
 import { Command } from "./command";
 import { Chatbot } from "../chat-ai/chat-bot";
+import { DiscordClient } from "../discordClient";
 
 const CHAT_TIMER = 900000; //end chat after 15 minutes, aka 900000
 
 async function chatListener(msg: Message<boolean>) {
     if(msg.author.username != Chatbot.getInstance().userName && Chatbot.getInstance().getChatActiveState(msg.guildId, msg.channelId)) {
         console.log(`Chat in ${msg.guildId}-${msg.channelId} is active. Sending message.`)
-        const chatResult = await Chatbot.getInstance().sendMessage(msg.guildId, msg.channelId, `${msg.author.username}: ${msg.content}`)
-        if (chatResult) {
-            (await msg.client.channels.cache.get(msg.channelId) as TextChannel).send(chatResult)
-        }
+        await Chatbot.getInstance().sendMessage(msg.guildId, msg.channelId, `${msg.author.username}: ${msg.content}`);
     }
 };
 
@@ -22,13 +20,9 @@ async function endChat(client: Client, interaction: CommandInteraction) {
     }
     Chatbot.getInstance().clearChatTimer(interaction.guildId, interaction.channelId)
     console.log(JSON.stringify(Chatbot.getInstance().getHistory(interaction.guildId, interaction.channelId)));
-    const chatResult = await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna has to leave and says:`);
-    if (chatResult) {
-        await interaction.followUp({
-            ephemeral: false,
-            content: `${chatResult}\n*Rivanna leaves chat*`
-        });
-    }
+    await interaction.followUp({ content: "*Rivanna readies herself*" });
+    await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna has to leave and says:`);
+    (DiscordClient.getClient().channels.cache.get(interaction.channelId) as TextChannel).send("*Rivanna leaves chat*");
     Chatbot.getInstance().setChatActiveState(interaction.guildId, interaction.channelId, false);
     if (!Chatbot.getInstance().isActive()) {
         console.log("No more open chats-- shutting off listener");
@@ -54,13 +48,11 @@ export const ChatStart: Command = {
         }
         Chatbot.getInstance().setChatActiveState(interaction.guildId, interaction.channelId, true);
         Chatbot.getInstance().setChatTimer(interaction.guildId, interaction.channelId, setTimeout(async () => { endChat(client, interaction); }, CHAT_TIMER));
-        const chatResult = await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna walks in and she says:`);
-        if (chatResult) {
-            await interaction.followUp({
-                ephemeral: false,
-                content: `*Rivanna enters chat*\n${chatResult}`
-            });
-        }
+        await interaction.followUp({
+            ephemeral: false,
+            content: `*Rivanna enters chat*`
+        });
+        await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna walks in and she says:`);
     }
 }
 

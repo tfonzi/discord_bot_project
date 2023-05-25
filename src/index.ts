@@ -1,17 +1,17 @@
-import { ClientOptions, Client, GatewayIntentBits} from "discord.js";
+import { GatewayIntentBits} from "discord.js";
 import * as dotenv from "dotenv";
 
 import ready from "./listeners/ready";
 import interactionCreate from "./listeners/interactionCreate";
 import { Chatbot } from "./chat-ai/chat-bot";
+import { DiscordClient } from "./discordClient";
+import { Configuration, CreateEmbeddingRequest, OpenAIApi } from "openai";
 
 interface discordBotEnv {
     discordBotToken: string;
     openAiToken: string;
 }
 
-const clientOptions: ClientOptions = {intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent]};
-const client = new Client(clientOptions);
 dotenv.config();
 
 try {
@@ -30,6 +30,12 @@ try {
         throw Error("No openai token in env");
     }
 
+    // Setting up DiscordClient
+    const client = DiscordClient.createClient({
+        intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent]
+    });
+
+    // Setting up Chatbot
     console.log(`Creating chatbot with ${tokens.openAiToken.substring(0,5)}...`);
     Chatbot.setKey(tokens.openAiToken);
     Chatbot.setContext(process.env.CONTEXT);

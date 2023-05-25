@@ -1,6 +1,9 @@
 import { CreateChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionRequestMessageRoleEnum, Configuration, OpenAIApi } from "openai"
+import { TextChannel } from "discord.js";
 import { encode } from "gpt-3-encoder"
 import { Mutex } from 'async-mutex';
+
+import { DiscordClient } from "../discordClient";
 
 const COLLECT_TIMER = 3000; //collect after 3 second
 
@@ -35,7 +38,7 @@ class MessageHistory implements MessageHistory { // MessageHistory class -- modi
 }
 
 interface MessageProcessor {
-    processMessage(msg: string): Promise<string | undefined>
+    processMessage(msg: string, channelId: string): Promise<void>
 }
 
 class MessageProcessor implements MessageProcessor { // MessageProcessor class -- Processes messages for chatbot
@@ -48,7 +51,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         this.isCollecting = false;
     }
 
-    async processMessage(msg: string): Promise<string | undefined> {
+    async processMessage(msg: string, channelId: string): Promise<void> {
         console.log("about to store message into basket");
         let release = await this.mutex.acquire();
         try {
@@ -60,6 +63,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         console.log("stored message into basket - left mutex");
         let result = undefined;
         if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
+            (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).sendTyping();
             this.isCollecting = true;
             console.log("starting timer for processing messages");
             await new Promise(resolve => setTimeout(resolve, COLLECT_TIMER)); // waiting for timer to end
@@ -74,14 +78,14 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                     const request: CreateChatCompletionRequest = {
                         model: "gpt-3.5-turbo",
                         messages: this.history.getHistory(),
-                        temperature: 1.3,
-                        max_tokens: 250,
-                        presence_penalty: 0.1,
+                        temperature: 1.2,
+                        max_tokens: 300,
+                        presence_penalty: 0,
                         frequency_penalty: -0.2
                     }
                     const completion = await this.openAi.createChatCompletion(request);
                     this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: completion.data.choices[0].message.content});
-                    result = completion.data.choices[0].message.content.replace("Rivanna:", "");
+                    (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send(completion.data.choices[0].message.content.replace("Rivanna:", ""));
                     this.basket = []; // refresh basket
                 }
                 
@@ -93,13 +97,11 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         } else {
             console.log("timer has already been started, returning undefined");
         }
-        console.log(`returning ${result}`);
-        return result;
-        }
     }
+}
 
 export interface Chatbot {
-    sendMessage(guildId: string, thread: string, msg: string): Promise<string | undefined>,
+    sendMessage(guildId: string, thread: string, msg: string): Promise<void>,
     username: string,
     setChatActiveState(guildId: string, channelId: string, state: boolean): void,
     getChatActiveState(guildId: string, channelId: string): boolean,
@@ -195,7 +197,7 @@ export class Chatbot implements Chatbot {
         this.activeChatTimers.delete(`${guildId}-${channelId}`);
     }
 
-    async sendMessage(guildId: string, channelId: string, msg: string): Promise<string | undefined> {
+    async sendMessage(guildId: string, channelId: string, msg: string): Promise<void> {
         try {
             if (!this.context || !this.openai) {
                 throw new Error("Missing Context or OpenAI key!");
@@ -209,12 +211,11 @@ export class Chatbot implements Chatbot {
             if (!this.processers.has(`${guildId}-${channelId}`)){ // populate new MessageProcessor for channel if it does not exist
                 this.processers.set(`${guildId}-${channelId}`, new MessageProcessor(this.messageHistories.get(`${guildId}-${channelId}`), this.openai));
             }
-            const chatResult = await this.processers.get(`${guildId}-${channelId}`).processMessage(msg);
-            return chatResult
+            await this.processers.get(`${guildId}-${channelId}`).processMessage(msg, channelId);
         }
         catch(err) {
             console.error(err);
-            return Promise.resolve("Sorry! I'm having trouble thinking of a response right now. Please try later.");
+            (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send("Sorry! I'm having trouble thinking of a response right now. Please try later.");
         }
     }
 }
