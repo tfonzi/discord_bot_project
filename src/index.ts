@@ -5,11 +5,16 @@ import ready from "./listeners/ready";
 import interactionCreate from "./listeners/interactionCreate";
 import { Chatbot } from "./chat-ai/chat-bot";
 import { DiscordClient } from "./discordClient";
-import { Configuration, CreateEmbeddingRequest, OpenAIApi } from "openai";
 
-interface discordBotEnv {
+export interface discordBotEnv {
     discordBotToken: string;
     openAiToken: string;
+}
+
+export interface redisEnv {
+    redisHost: string;
+    redisPort: string;
+    redisPassword: string;
 }
 
 dotenv.config();

@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: "."
+    #image: "611260057175.dkr.ecr.us-east-2.amazonaws.com/tfonzi:latest"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      BOT_ENV: ${BOT_ENV}
+      CONTEXT: ${CONTEXT}
+    volumes:
+      - ./:/local_dir
+  redis:
+    #build: ./redis
+    image: redis/redis-stack-server:latest
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --save 20 1 --loglevel warning --requirepass "${REDIS_PASSWORD}" --loadmodule /opt/redis-stack/lib/redisearch.so --loadmodule /opt/redis-stack/lib/rejson.so
+    volumes:
+      - redis:/data
+volumes:
+  redis:
+    driver: local
