@@ -2,7 +2,7 @@ import { Client, ClientOptions } from "discord.js";
 
 export interface DiscordClient {
     createClient(options: ClientOptions): Client<boolean>,
-    deleteClient(),
+    deleteClient(): void,
     getClient(): Client<boolean>
 }
 
@@ -14,7 +14,7 @@ export class DiscordClient implements DiscordClient {
         return DiscordClient.instance;
     }
 
-    public static deleteClient() {
+    public static deleteClient(): void {
         if (!DiscordClient.instance) {
             throw new Error("There is no client defined to erase");
         }

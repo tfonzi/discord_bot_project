@@ -4,6 +4,7 @@ import { encode } from "gpt-3-encoder"
 import { Mutex } from 'async-mutex';
 
 import { DiscordClient } from "../discordClient";
+import { RedisEmbeddingService } from "../redis/RedisEmbeddingService";
 
 const COLLECT_TIMER = 3000; //collect after 3 second
 
@@ -52,32 +53,43 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
     }
 
     async processMessage(msg: string, channelId: string): Promise<void> {
-        console.log("about to store message into basket");
         let release = await this.mutex.acquire();
         try {
-            console.log("storing message into basket - entered mutex");
             this.basket.push(msg);
         } finally {
             release();
         }
-        console.log("stored message into basket - left mutex");
         let result = undefined;
         if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
             (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).sendTyping();
             this.isCollecting = true;
-            console.log("starting timer for processing messages");
             await new Promise(resolve => setTimeout(resolve, COLLECT_TIMER)); // waiting for timer to end
-            console.log("done waiting for timer");
             release = await this.mutex.acquire();
             try {
-                console.log("generating response - entered mutex");
                 if (this.basket.length > 0) {
-                    this.basket.forEach(message => {
+                    // extract extraContext out given messages.
+                    const guildId = (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).guildId;
+                    const extraContext = await Promise.all((this.basket.map(async (message) => {
                         this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: message});
+                        return RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(message)));
+                    }))).then(res => {
+                        return res.reduce((a: string, v: string[]) => {
+                            v.forEach((i) => { a = a.concat(`${i}. `); });
+                            return a;
+                        }, '"Here is some additional context that may help you with your acting: ');
                     });
+                    let conversationContext = this.history.getHistory();
+                    const fullContext = [
+                        conversationContext[0], //original context
+                        { 
+                            role: ChatCompletionRequestMessageRoleEnum.User, 
+                            content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
+                        }, 
+                        ...conversationContext.slice(1) // the converstation
+                    ];
                     const request: CreateChatCompletionRequest = {
                         model: "gpt-3.5-turbo",
-                        messages: this.history.getHistory(),
+                        messages: fullContext,
                         temperature: 1.2,
                         max_tokens: 300,
                         presence_penalty: 0,
@@ -91,12 +103,10 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                 
             } finally {
                 this.isCollecting = false; // refresh collecting state
-                console.log("done generating response - left mutex");
                 release();
             }
-        } else {
-            console.log("timer has already been started, returning undefined");
         }
+        // if we are currently collecting messages, then adding to basket was enough. Rest of function is no-op
     }
 }
 
@@ -108,7 +118,8 @@ export interface Chatbot {
     isActive(): boolean,
     setChatTimer(guildId: string, channelId: string, timer: NodeJS.Timeout): void,
     clearChatTimer(guildId: string, channelId: string): void,
-    getHistory(guildId: string, channelId: string): MessageHistory
+    getHistory(guildId: string, channelId: string): MessageHistory,
+    createEmbedding(text: string): Promise<number[]>
 }
 
 export class Chatbot implements Chatbot {
@@ -217,5 +228,12 @@ export class Chatbot implements Chatbot {
             console.error(err);
             (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send("Sorry! I'm having trouble thinking of a response right now. Please try later.");
         }
+    }
+
+    async createEmbedding(text: string): Promise<number[]> {
+        return (await this.openai.createEmbedding({
+            model: "text-embedding-ada-002",
+            input: text
+        })).data.data[0].embedding;
     }
 }

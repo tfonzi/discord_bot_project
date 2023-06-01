@@ -5,6 +5,7 @@ import ready from "./listeners/ready";
 import interactionCreate from "./listeners/interactionCreate";
 import { Chatbot } from "./chat-ai/chat-bot";
 import { DiscordClient } from "./discordClient";
+import { RedisEmbeddingService } from "./redis/RedisEmbeddingService";
 
 export interface discordBotEnv {
     discordBotToken: string;
@@ -34,6 +35,17 @@ try {
     } else {
         throw Error("No openai token in env");
     }
+
+    if(!process.env.REDIS_PASSWORD) {
+        throw Error("No redis password stored in env");
+    }
+    console.log(`Found env var for redisPassword ${process.env.REDIS_PASSWORD.substring(0,2)}...`);
+
+    RedisEmbeddingService.CreateClient(process.env.REDIS_PASSWORD).catch(
+        (err) => {
+            throw err;
+        }
+    );
 
     // Setting up DiscordClient
     const client = DiscordClient.createClient({
