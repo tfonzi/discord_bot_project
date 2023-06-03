@@ -69,6 +69,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                 if (this.basket.length > 0) {
                     // extract extraContext out given messages.
                     const guildId = (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).guildId;
+                    await RedisEmbeddingService.CreateIndexForEmbedding(guildId); // no-op if index has already been created
                     const extraContext = await Promise.all((this.basket.map(async (message) => {
                         this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: message});
                         return RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(message)));

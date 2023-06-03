@@ -3,8 +3,8 @@
 node_modules/*
 dist/*
 notes/*
-.txt
+*.txt
 redis-volume/*
 docker-test.sh
-.pem
+*.pem
 .tokens
