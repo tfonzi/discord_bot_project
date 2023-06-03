@@ -17,7 +17,7 @@ This bot is confirmed working within an AWS EC2 instance.
 
 Things you'll want to do in AWS:
 
- - Create secret keys for discord, open-ai, and redis password.
+ - Create secret keys for discord, open-ai, and redis password. (Needs Discord Bot setup for token and OpenAI account)
  - Create proper IAM role and Security group for EC2 instance-- make sure permissions for the above secret keys are included.
  - Start up in EC2 with the following start-up script in the user data field
 
