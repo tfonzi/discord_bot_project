@@ -7,31 +7,17 @@ import { Chatbot } from "./chat-ai/chat-bot";
 import { DiscordClient } from "./discordClient";
 import { RedisEmbeddingService } from "./redis/RedisEmbeddingService";
 
-export interface discordBotEnv {
-    discordBotToken: string;
-    openAiToken: string;
-}
-
-export interface redisEnv {
-    redisHost: string;
-    redisPort: string;
-    redisPassword: string;
-}
-
 dotenv.config();
 
 try {
-    if(!process.env.BOT_ENV) {
-        throw Error("No bot env");
-    }
-    const tokens: discordBotEnv = JSON.parse(process.env.BOT_ENV);
-    if(tokens.discordBotToken) {
-        console.log(`Found env var for bot token ${tokens.discordBotToken.substring(0,5)}...`);
+    
+    if(process.env.DISCORD_TOKEN) {
+        console.log(`Found env var for bot token ${process.env.DISCORD_TOKEN.substring(0,5)}...`);
     } else {
         throw Error("No discord token in env");
     }
-    if(tokens.openAiToken) {
-        console.log(`Found env var for openai token ${tokens.openAiToken.substring(0,5)}...`);
+    if(process.env.OPENAI_TOKEN) {
+        console.log(`Found env var for openai token ${process.env.OPENAI_TOKEN.substring(0,5)}...`);
     } else {
         throw Error("No openai token in env");
     }
@@ -53,16 +39,16 @@ try {
     });
 
     // Setting up Chatbot
-    console.log(`Creating chatbot with ${tokens.openAiToken.substring(0,5)}...`);
-    Chatbot.setKey(tokens.openAiToken);
+    console.log(`Creating chatbot with ${process.env.OPENAI_TOKEN.substring(0,5)}...`);
+    Chatbot.setKey(process.env.OPENAI_TOKEN);
     Chatbot.setContext(process.env.CONTEXT);
 
     // registering listeners
     ready(client);
     interactionCreate(client);
 
-    console.log(`About to log in with ${tokens.discordBotToken.substring(0,5)}...`);
-    client.login(tokens.discordBotToken);
+    console.log(`About to log in with ${process.env.DISCORD_TOKEN.substring(0,5)}...`);
+    client.login(process.env.DISCORD_TOKEN);
 }
 catch(err) {
     //crash hangs-- allows me to enter docker container

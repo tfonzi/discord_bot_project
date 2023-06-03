@@ -1,17 +1,33 @@
 services:
   bot:
     build: "."
+    container_name: bot
+    networks:
+      botNetwork:
+        aliases:
+          - bot
     environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      OPENAI_TOKEN: ${OPENAI_TOKEN}
       REDIS_PASSWORD: ${REDIS_PASSWORD}
-      BOT_ENV: ${BOT_ENV}
       CONTEXT: ${CONTEXT}
     volumes:
-      - ./:/local_dir
+      - ./bot:/bot/shared
   redis:
     image: redis/redis-stack-server:latest
+    container_name: redis
+    networks:
+      botNetwork:
+        aliases:
+          - redis
     restart: always
     ports:
       - "6379:6379"
     command: redis-server --appendonly yes --appendfilename "embeddings.aof" --dir ./data --loglevel warning --requirepass "${REDIS_PASSWORD}" --loadmodule /opt/redis-stack/lib/redisearch.so --loadmodule /opt/redis-stack/lib/rejson.so
     volumes:
       - ./redis-volume:/data
+  
+networks:
+  botNetwork:
+    name: botNetwork
+    driver: bridge
