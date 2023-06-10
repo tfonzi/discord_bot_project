@@ -45,7 +45,59 @@ sudo npm install
 sudo npm run build
 
 # setup cloudwatch
-sudo yum install amazon-cloudwatch-agent
+sudo yum -y install amazon-cloudwatch-agent
+sudo touch /opt/aws/amazon-cloudwatch-agent/bin/config.json
+sudo echo '{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/discord_bot_project/botLogs/bot.log",
+            "log_group_name": "bot.log",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 7
+          }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "aggregation_dimensions": [
+      [
+        "InstanceId"
+      ]
+    ],
+    "append_dimensions": {
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}",
+      "ImageId": "${aws:ImageId}",
+      "InstanceId": "${aws:InstanceId}",
+      "InstanceType": "${aws:InstanceType}"
+    },
+    "metrics_collected": {
+      "disk": {
+        "measurement": [
+          "used_percent"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "*"
+        ]
+      },
+      "mem": {
+        "measurement": [
+          "mem_used_percent"
+        ],
+        "metrics_collection_interval": 60
+      }
+    }
+  }
+}' | sudo tee -a /opt/aws/amazon-cloudwatch-agent/bin/config.json
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json
 
 # set up env variables, fetching from AWS secrets (won't work without proper permissions/naming)
 sudo touch .env

@@ -2,6 +2,7 @@
 import { ApplicationCommandOptionType, ApplicationCommandType, Client, CommandInteraction } from "discord.js";
 
 import { Command } from "./command";
+import { Logger } from "../logger/logger";
 
 export const Roll: Command = {
     name: "roll",
@@ -60,6 +61,7 @@ export const Roll: Command = {
         type: ApplicationCommandOptionType.Integer
     }],
     run: async (_client: Client, interaction: CommandInteraction) => {
+        const logger = Logger.getLogger();
         let diceCommand = "";
         if (interaction.options.get("d20")) {
             diceCommand += ` ${interaction.options.get("d20").value}d20`
@@ -86,9 +88,11 @@ export const Roll: Command = {
            shift = (interaction.options.get("add_to_roll").value as number);
         }
 
+        const commandResponse = processDiceCommand(diceCommand, shift);
+        logger.log(`[channel-${interaction.channelId}] Answered command with: ${commandResponse}`);
         await interaction.followUp({
             ephemeral: true,
-            content: processDiceCommand(diceCommand, shift)
+            content: commandResponse
         });
     }
 

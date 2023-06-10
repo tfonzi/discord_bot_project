@@ -12,7 +12,7 @@ const handleSlashCommand = async (client: Client, interaction: CommandInteractio
     }
     await interaction.deferReply();
     try {
-        logger.log(`[channel-${interaction.channelId}] Received a command: ${interaction.commandName}`)
+        logger.log(`[channel-${interaction.channelId}] Received a command: ${interaction.commandName}`);
         if (interaction.command.options){
             logger.debug(`[channel-${interaction.channelId}] Command options were: ${JSON.stringify(interaction.options, null, 2)}`)
         }

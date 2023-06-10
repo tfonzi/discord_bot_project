@@ -29,7 +29,7 @@ async function endChat(client: Client, interaction: CommandInteraction) {
     logger.debug(JSON.stringify(Chatbot.getInstance().getHistory(interaction.guildId, interaction.channelId), null, 2));
     await interaction.followUp({ content: "*Rivanna readies herself*" });
     await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna has to leave and says:`);
-    (DiscordClient.getClient().channels.cache.get(interaction.channelId) as TextChannel).send("*Rivanna leaves chat*");
+    await DiscordClient.postMessage("*Rivanna leaves chat*", interaction.channelId);
     Chatbot.getInstance().setChatActiveState(interaction.guildId, interaction.channelId, false);
     if (!Chatbot.getInstance().isActive()) {
         logger.debug("No more open chats-- shutting off listener");

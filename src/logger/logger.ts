@@ -25,7 +25,7 @@ export class Logger implements Logger {
     }
 
     log(text: string) {
-        const formatted = `${(new Date(Date.now())).toISOString()} [INFO] ${text} \n`
+        const formatted = `${(new Date(Date.now())).toISOString()} [Info] ${text} \n`
         this.logStream.write(formatted);
         console.log(formatted);
     }

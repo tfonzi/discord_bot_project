@@ -1,7 +1,8 @@
-import { CreateChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionRequestMessageRoleEnum, Configuration, OpenAIApi } from "openai"
+import { CreateChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionRequestMessageRoleEnum, Configuration, OpenAIApi, CreateChatCompletionResponse } from "openai"
 import { TextChannel } from "discord.js";
 import { encode } from "gpt-3-encoder"
 import { Mutex } from 'async-mutex';
+import { AxiosResponse } from "axios";
 
 import { DiscordClient } from "../discordClient";
 import { RedisEmbeddingService } from "../redis/RedisEmbeddingService";
@@ -55,6 +56,20 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         this.isCollecting = false;
     }
 
+    private async sendMessageAPI(request: CreateChatCompletionRequest, attempts: number = 0): Promise<AxiosResponse<CreateChatCompletionResponse, any>> {
+        const logger = Logger.getLogger();
+        try {
+            return await this.openAi.createChatCompletion(request);
+        } catch (err) {
+            logger.error(err);
+            if (attempts < 3) { // 3 attempts
+                return await this.sendMessageAPI(request, attempts + 1);
+            } else {
+                throw err;
+            }
+        }
+    }
+
     async processMessage(msg: string, channelId: string): Promise<void> {
         const logger = Logger.getLogger();
         this.requestBasket.push(msg);
@@ -71,7 +86,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         }
         let result = undefined;
         if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
-            (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).sendTyping();
+            await DiscordClient.sendTyping(channelId);
             this.isCollecting = true;
             logger.debug(`[channel-${channelId}] Collecting chat entries. Bucketed first chat entry`)
             await new Promise(resolve => setTimeout(resolve, COLLECT_TIMER)); // blocks until timer ends
@@ -79,7 +94,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
             try {
                 if (this.responseBasket.length > 0) {
                     // extract extraContext out given messages.
-                    const guildId = (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).guildId;
+                    const guildId = DiscordClient.getGuildId(channelId);
                     await RedisEmbeddingService.CreateIndexForEmbedding(guildId); // no-op if index has already been created
                     const extraContext = await Promise.all((this.responseBasket.map(async (message) => {
                         this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: message});
@@ -107,13 +122,12 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                         presence_penalty: 0,
                         frequency_penalty: -0.2
                     }
-                    const chatResponse = (await this.openAi.createChatCompletion(request)).data.choices[0].message.content;;
+                    const chatResponse = (await this.sendMessageAPI(request)).data.choices[0].message.content;;
                     this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: chatResponse});
-                    (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send(chatResponse.replace("Rivanna:", ""));
+                    await DiscordClient.postMessage(chatResponse.replace("Rivanna:", ""), channelId);
                     logger.log(`[channel-${channelId}] [Bot] "${chatResponse}"`)
                     this.responseBasket = []; // refresh responseBasket
                 }
-                
             } finally {
                 logger.debug(`[channel-${channelId}] Done collecting chat entries`)
                 this.isCollecting = false; // refresh collecting state
@@ -244,14 +258,24 @@ export class Chatbot implements Chatbot {
         }
         catch(err) {
             logger.error(err);
-            (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send("Sorry! I'm having trouble thinking of a response right now. Please try later.");
+            DiscordClient.postMessage("Sorry! I'm having trouble thinking of a response right now. Please try later.", channelId);
         }
     }
 
-    async createEmbedding(text: string): Promise<number[]> {
-        return (await this.openai.createEmbedding({
-            model: "text-embedding-ada-002",
-            input: text
-        })).data.data[0].embedding;
+    async createEmbedding(text: string, attempts: number = 0): Promise<number[]> {
+        const logger = Logger.getLogger();
+        try {
+            return (await this.openai.createEmbedding({
+                model: "text-embedding-ada-002",
+                input: text
+            })).data.data[0].embedding;
+        } catch(err) {
+            logger.error(err);
+            if (attempts < 3) {
+                return await this.createEmbedding(text, attempts + 1);
+            } else {
+                throw err;
+            }
+        }
     }
 }
