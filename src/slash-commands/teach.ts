@@ -5,7 +5,7 @@ import { RedisEmbeddingService } from "../redis/RedisEmbeddingService";
 import { Chatbot } from "../chat-ai/chat-bot";
 import { Logger } from "../logger/logger";
 
-const subjectPronouns = ["I ", "We", "My", "we", "my", "i "];
+const subjectPronouns = ["I ", "We", "My", "we", "my", "i ", "You", "you"];
 
 export const Teach: Command = {
     name: "teach",
@@ -21,7 +21,7 @@ export const Teach: Command = {
         const logger = Logger.getLogger();
         let memory: string = (interaction.options.get("memory").value! as string);
         // if start of memory includes specific pronouns, prompt user to be more specific
-        if (subjectPronouns.some(substring=>memory.substring(0,3).includes(substring))){
+        if (subjectPronouns.some(substring=>memory.substring(0,4).includes(substring))){
             await interaction.followUp({
                 ephemeral: false,
                 content: `"${memory}"\n\n${interaction.user.username}, Please try to use names instead of pronouns like "I" or "My". Adjust your phrasing and I'll have a better time remembering!`
