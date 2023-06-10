@@ -8,3 +8,4 @@ redis-volume/*
 docker-test.sh
 *.pem
 .tokens
+*.log

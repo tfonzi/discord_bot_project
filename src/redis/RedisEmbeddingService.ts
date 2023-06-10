@@ -1,4 +1,5 @@
 import { RedisClientType, SchemaFieldTypes, VectorAlgorithms, createClient } from "redis";
+import { Logger } from "../logger/logger";
 
 function float32Buffer(arr: number[]) {
     return Buffer.from(new Float32Array(arr).buffer);
@@ -70,6 +71,7 @@ export class RedisEmbeddingService implements RedisEmbeddingService {
         if (!RedisEmbeddingService.instance) {
             throw new Error("Cannot create index: No connected client exists");
         }
+        const logger = Logger.getLogger();
         try {
             await RedisEmbeddingService.instance.ft.create(`idx:${indexName}`, {
                 "embedding": {
@@ -83,13 +85,13 @@ export class RedisEmbeddingService implements RedisEmbeddingService {
                 ON: 'HASH',
                 PREFIX: `noderedis:${indexName}`
             });
-            console.log(`Created index ${indexName}`);
+            logger.debug(`Created index ${indexName}`);
         } catch (e) {
             if ((e as Error).message === 'Index already exists') {
-                console.log(`Index ${indexName} exists already`);
+                //logger.debug(`Index ${indexName} exists already`); //is spammy
               } else {
                 // Something else went wrong
-                console.error(e);
+                logger.error(e);
                 throw e;
               }
         }
@@ -99,11 +101,12 @@ export class RedisEmbeddingService implements RedisEmbeddingService {
         if (!RedisEmbeddingService.instance) {
             throw new Error("Cannot set key: No connected client exists");
         }
+        const logger = Logger.getLogger();
         if (!(await RedisEmbeddingService.indexExists(indexName))) {
             throw new Error(`Cannot set key: Index ${indexName} does not exist`);
         }
         await RedisEmbeddingService.instance.hSet(`noderedis:${indexName}:${value.text}`, { embedding: float32Buffer(value.embedding) });
-        console.log(`Created value at key: ${value.text.substring(0, 10)}... for index: ${indexName}`);
+        logger.debug(`Created value at key: ${value.text.substring(0, 10)}... for index: ${indexName}`);
     }
 
     public static async PerformVectorSimilarity(indexName: string, embedding: number[]): Promise<string[]> {

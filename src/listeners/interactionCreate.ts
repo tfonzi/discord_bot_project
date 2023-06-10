@@ -1,8 +1,10 @@
 import { Client, Interaction, CommandInteraction} from "discord.js";
 
 import { Commands } from "./../slash-commands";
+import { Logger } from "../logger/logger";
 
 const handleSlashCommand = async (client: Client, interaction: CommandInteraction): Promise<void> => {
+    const logger = Logger.getLogger();
     const slashCommand = Commands.find(c => c.name === interaction.commandName);
     if (!slashCommand) {
         interaction.followUp({ content: "An error has occurred" });
@@ -10,9 +12,13 @@ const handleSlashCommand = async (client: Client, interaction: CommandInteractio
     }
     await interaction.deferReply();
     try {
+        logger.log(`[channel-${interaction.channelId}] Received a command: ${interaction.commandName}`)
+        if (interaction.command.options){
+            logger.debug(`[channel-${interaction.channelId}] Command options were: ${JSON.stringify(interaction.options, null, 2)}`)
+        }
         slashCommand.run(client, interaction);
     } catch(err) {
-        console.error(err);
+        logger.error(err);
         interaction.followUp({ content: "An error has occurred" });
     }
     

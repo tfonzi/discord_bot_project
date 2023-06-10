@@ -11,8 +11,10 @@ services:
       OPENAI_TOKEN: ${OPENAI_TOKEN}
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       CONTEXT: ${CONTEXT}
+      LOG_LEVEL: ${LOG_LEVEL}
     volumes:
       - ./bot:/bot/shared
+      - ./botLogs:/bot/logs
   redis:
     image: redis/redis-stack-server:latest
     container_name: redis

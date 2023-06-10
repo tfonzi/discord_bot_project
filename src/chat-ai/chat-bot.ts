@@ -5,6 +5,7 @@ import { Mutex } from 'async-mutex';
 
 import { DiscordClient } from "../discordClient";
 import { RedisEmbeddingService } from "../redis/RedisEmbeddingService";
+import { Logger } from "../logger/logger";
 
 const COLLECT_TIMER = 3000; //collect after 3 second
 
@@ -32,8 +33,9 @@ class MessageHistory implements MessageHistory { // MessageHistory class -- modi
     }
 
     getTokens(): number {
-        console.log(this.getHistory().reduce((totalString: string, request) => { return totalString.concat(JSON.stringify(request)); }, ""));
-        return encode(this.getHistory().reduce((totalString: string, request) => { return totalString.concat(JSON.stringify(request)); }, "")).length;
+        const logger = Logger.getLogger();
+        logger.debug(this.getHistory().reduce((totalString: string, request) => { return totalString.concat(JSON.stringify(request, null, 2)); }, ""));
+        return encode(this.getHistory().reduce((totalString: string, request) => { return totalString.concat(JSON.stringify(request, null, 2)); }, "")).length;
     }
 
 }
@@ -43,7 +45,8 @@ interface MessageProcessor {
 }
 
 class MessageProcessor implements MessageProcessor { // MessageProcessor class -- Processes messages for chatbot
-    private basket: string[] = [];
+    private requestBasket: string[] = []; //basket for storing requests
+    private responseBasket: string[] = []; //basket for generating response
     private isCollecting: boolean;
     private mutex: Mutex;
 
@@ -53,9 +56,16 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
     }
 
     async processMessage(msg: string, channelId: string): Promise<void> {
+        const logger = Logger.getLogger();
+        this.requestBasket.push(msg);
         let release = await this.mutex.acquire();
         try {
-            this.basket.push(msg);
+            //process in order
+            this.requestBasket.forEach(msg => {
+                logger.log(`[channel-${channelId}] [User] "${msg}"`)
+                this.responseBasket.push(msg);
+            });
+            this.requestBasket = [];
         } finally {
             release();
         }
@@ -63,14 +73,15 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
             (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).sendTyping();
             this.isCollecting = true;
-            await new Promise(resolve => setTimeout(resolve, COLLECT_TIMER)); // waiting for timer to end
+            logger.debug(`[channel-${channelId}] Collecting chat entries. Bucketed first chat entry`)
+            await new Promise(resolve => setTimeout(resolve, COLLECT_TIMER)); // blocks until timer ends
             release = await this.mutex.acquire();
             try {
-                if (this.basket.length > 0) {
+                if (this.responseBasket.length > 0) {
                     // extract extraContext out given messages.
                     const guildId = (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).guildId;
                     await RedisEmbeddingService.CreateIndexForEmbedding(guildId); // no-op if index has already been created
-                    const extraContext = await Promise.all((this.basket.map(async (message) => {
+                    const extraContext = await Promise.all((this.responseBasket.map(async (message) => {
                         this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: message});
                         return RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(message)));
                     }))).then(res => {
@@ -96,18 +107,22 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                         presence_penalty: 0,
                         frequency_penalty: -0.2
                     }
-                    const completion = await this.openAi.createChatCompletion(request);
-                    this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: completion.data.choices[0].message.content});
-                    (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send(completion.data.choices[0].message.content.replace("Rivanna:", ""));
-                    this.basket = []; // refresh basket
+                    const chatResponse = (await this.openAi.createChatCompletion(request)).data.choices[0].message.content;;
+                    this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: chatResponse});
+                    (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send(chatResponse.replace("Rivanna:", ""));
+                    logger.log(`[channel-${channelId}] [Bot] "${chatResponse}"`)
+                    this.responseBasket = []; // refresh responseBasket
                 }
                 
             } finally {
+                logger.debug(`[channel-${channelId}] Done collecting chat entries`)
                 this.isCollecting = false; // refresh collecting state
                 release();
             }
+        } else {
+            logger.debug(`[channel-${channelId}] Bucketed chat entry.`)
         }
-        // if we are currently collecting messages, then adding to basket was enough. Rest of function is no-op
+        // if we are currently collecting messages, then adding to responseBasket was enough. Rest of function is no-op
     }
 }
 
@@ -177,12 +192,13 @@ export class Chatbot implements Chatbot {
     }
 
     setChatActiveState(guildId: string, channelId: string, state: boolean) {
-        console.log(`Set ${guildId}-${channelId} to ${state}`);
+        const logger = Logger.getLogger();
+        logger.debug(`Set ${guildId}-${channelId} to ${state}`);
         if (state && !this.activeChats.includes(`${guildId}-${channelId}`)) {
             this.activeChats.push(`${guildId}-${channelId}`);
         } else if (!state && this.activeChats.includes(`${guildId}-${channelId}`)) {
             this.activeChats= this.activeChats.filter(x => x !== `${guildId}-${channelId}`);
-            console.log(`new activeChats is: ${this.activeChats}`);
+            logger.debug(`new activeChats is: ${this.activeChats}`);
         }
     }
 
@@ -210,6 +226,7 @@ export class Chatbot implements Chatbot {
     }
 
     async sendMessage(guildId: string, channelId: string, msg: string): Promise<void> {
+        const logger = Logger.getLogger();
         try {
             if (!this.context || !this.openai) {
                 throw new Error("Missing Context or OpenAI key!");
@@ -226,7 +243,7 @@ export class Chatbot implements Chatbot {
             await this.processers.get(`${guildId}-${channelId}`).processMessage(msg, channelId);
         }
         catch(err) {
-            console.error(err);
+            logger.error(err);
             (DiscordClient.getClient().channels.cache.get(channelId) as TextChannel).send("Sorry! I'm having trouble thinking of a response right now. Please try later.");
         }
     }

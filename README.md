@@ -44,11 +44,17 @@ cd /discord_bot_project
 sudo npm install
 sudo npm run build
 
+# setup cloudwatch
+sudo yum install amazon-cloudwatch-agent
+
 # set up env variables, fetching from AWS secrets (won't work without proper permissions/naming)
 sudo touch .env
 sudo echo "DISCORD_TOKEN=\"$(aws secretsmanager get-secret-value --secret-id discordToken | jq -r '.SecretString')\"" | sudo tee -a .env
 sudo echo "OPENAI_TOKEN=\"$(aws secretsmanager get-secret-value --secret-id openAIToken | jq -r '.SecretString')\"" | sudo tee -a .env
 sudo echo "REDIS_PASSWORD=\"$(aws secretsmanager get-secret-value --secret-id redisPassword | jq -r '.SecretString')\"" | sudo tee -a .env
+
+# set up log level
+sudo echo 'LOG_LEVEL="DEBUG"' | sudo tee -a .env
 
 # set up context (the "personality" of your AI Chatbot)
 sudo echo 'CONTEXT="You are an actor in a movie script. You will respond to all of my questions as Rivanna. Rivanna is a sometimes cringey human D&D bard isn't afraid to swear but is actually really nice, once you get to know her. She lives in the Forgotten Realms. She cares about people but isn’t afraid to joke in a sinister manner. Rivanna has many friends in her party that she goes on adventures with."' | sudo tee -a .env

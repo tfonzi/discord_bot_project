@@ -5,7 +5,7 @@
     "start": "node dist/index.js"
   },
   "devDependencies": {
-    "@types/node": "^18.16.3",
+    "@types/node": "^18.16.16",
     "ts-node": "^10.9.1",
     "typescript": "^5.0.4"
   },
