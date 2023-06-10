@@ -7,6 +7,7 @@ import { AxiosResponse } from "axios";
 import { DiscordClient } from "../discordClient";
 import { RedisEmbeddingService } from "../redis/RedisEmbeddingService";
 import { Logger } from "../logger/logger";
+import { delay } from "../utils";
 
 const COLLECT_TIMER = 3000; //collect after 3 second
 
@@ -63,6 +64,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         } catch (err) {
             logger.error(err);
             if (attempts < 3) { // 3 attempts
+                await delay(100);
                 return await this.sendMessageAPI(request, attempts + 1);
             } else {
                 throw err;
@@ -272,6 +274,7 @@ export class Chatbot implements Chatbot {
         } catch(err) {
             logger.error(err);
             if (attempts < 3) {
+                await delay(100);
                 return await this.createEmbedding(text, attempts + 1);
             } else {
                 throw err;

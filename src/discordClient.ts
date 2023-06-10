@@ -1,5 +1,6 @@
 import { Client, ClientOptions, TextChannel } from "discord.js";
 import { Logger } from "./logger/logger";
+import { delay } from "./utils";
 
 export interface DiscordClient {
     createClient(options: ClientOptions): Client<boolean>,
@@ -44,6 +45,7 @@ export class DiscordClient implements DiscordClient {
         } catch (err) {
             logger.error(err);
             if (attempts < 3) { // 3 attempts
+                await delay(100);
                 await DiscordClient.sendTyping(channelId, attempts + 1);
                 return;
             } else {
@@ -80,6 +82,7 @@ export class DiscordClient implements DiscordClient {
         } catch (err) {
             logger.error(err);
             if (attempts < 3) { // 3 attempts
+                await delay(100);
                 await DiscordClient.postMessage(message, channelId, attempts + 1);
                 return;
             } else {
