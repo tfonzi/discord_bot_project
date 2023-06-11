@@ -171,7 +171,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                     const request: CreateChatCompletionRequest = {
                         model: "gpt-3.5-turbo",
                         messages: fullContext,
-                        temperature: 0.9,
+                        temperature: 1.17,
                         max_tokens: RESPONSE_TOKEN_LENGTH,
                         presence_penalty: 0.08,
                         frequency_penalty: -0.08
