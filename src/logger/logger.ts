@@ -1,4 +1,5 @@
 import { WriteStream, createWriteStream } from "fs";
+import { serializeError } from "serialize-error";
 
 const FILE_PATH = "./logs/bot.log"
 
@@ -39,7 +40,7 @@ export class Logger implements Logger {
     }
 
     error(error: Error) {
-        const formatted = `${(new Date(Date.now())).toISOString()} [Error] ${JSON.stringify(error, null, 2)} \n`
+        const formatted = `${(new Date(Date.now())).toISOString()} [Error] ${JSON.stringify(serializeError(error), null, 2)} \n`
         this.logStream.write(formatted);
         console.error(formatted);
     }

@@ -10,17 +10,26 @@ import { Logger } from "../logger/logger";
 import { delay } from "../utils";
 
 const COLLECT_TIMER = 3000; //collect after 3 second
+const RESPONSE_TOKEN_LENGTH = 300;
+
+function generateChatCompletionContext(originalContext: ChatCompletionRequestMessage, chatHistory: ChatCompletionRequestMessage[], extraContext: ChatCompletionRequestMessage): number {
+    const originalContextTokenLength = encode(originalContext.content).length;
+    const chatHistoryTokenLength = encode(chatHistory.reduce((totalString: string, chat) => { return totalString.concat(` ${chat.content}`); }, "")).length;
+    const extraContextTokenLength = encode(extraContext.content).length;
+    return (2*originalContextTokenLength) + chatHistoryTokenLength + extraContextTokenLength;
+}
 
 interface MessageHistory {
     addMessage(message: ChatCompletionRequestMessage),
+    getOriginalContext(): ChatCompletionRequestMessage,
     getHistory(): ChatCompletionRequestMessage[],
-    getTokens(): number
+    purgeOldestEntries(x: number)
 }
 
 class MessageHistory implements MessageHistory { // MessageHistory class -- modified queue for storing message history for Chatbot
     private storage: ChatCompletionRequestMessage[] = [];
 
-    constructor(private context: ChatCompletionRequestMessage, private capacity: number = 20) {}
+    constructor(private context: ChatCompletionRequestMessage, private capacity: number = 50) {}
 
     addMessage(msg: ChatCompletionRequestMessage): void {
 
@@ -30,16 +39,21 @@ class MessageHistory implements MessageHistory { // MessageHistory class -- modi
         this.storage.push(msg);
     }
 
+    getOriginalContext(): ChatCompletionRequestMessage {
+        return this.context;
+    }
+
     getHistory(): ChatCompletionRequestMessage[] {
-        return [this.context, ...this.storage]; // context needs to be first in chat completion
+        return [...this.storage];
     }
 
-    getTokens(): number {
-        const logger = Logger.getLogger();
-        logger.debug(this.getHistory().reduce((totalString: string, request) => { return totalString.concat(JSON.stringify(request, null, 2)); }, ""));
-        return encode(this.getHistory().reduce((totalString: string, request) => { return totalString.concat(JSON.stringify(request, null, 2)); }, "")).length;
+    purgeOldestEntries(x: number) { // purges x number of chats from history
+        if (this.storage.length <= x) {
+            this.storage = [];
+        } else {
+            this.storage.splice(0, x);
+        }
     }
-
 }
 
 interface MessageProcessor {
@@ -60,9 +74,12 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
     private async sendMessageAPI(request: CreateChatCompletionRequest, attempts: number = 0): Promise<AxiosResponse<CreateChatCompletionResponse, any>> {
         const logger = Logger.getLogger();
         try {
-            return await this.openAi.createChatCompletion(request);
+            logger.debug(`sent request: ${JSON.stringify(request, null, 2)}`);
+            const response = await this.openAi.createChatCompletion(request);
+            logger.debug(`received response: ${JSON.stringify(response.data, null, 2)}`);
+            return response
         } catch (err) {
-            logger.error(err);
+            logger.error(err as Error);
             if (attempts < 3) { // 3 attempts
                 await delay(100);
                 return await this.sendMessageAPI(request, attempts + 1);
@@ -107,22 +124,57 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                             return a;
                         }, '"Here is some additional context that may help you with your acting: ');
                     });
-                    let conversationContext = this.history.getHistory();
-                    const fullContext = [
-                        conversationContext[0], //original context
-                        { 
+                    let fullContextTokenLength = generateChatCompletionContext(this.history.getOriginalContext(), [...this.history.getHistory()], { 
+                        role: ChatCompletionRequestMessageRoleEnum.User, 
+                        content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
+                    });
+                    if ((fullContextTokenLength + 100 + RESPONSE_TOKEN_LENGTH > 4000)) { // if chat tokens is greater than 4000, we need to purge some of our chat history.
+                        logger.debug(`Chat history token length is ${fullContextTokenLength}. Purging oldest 10 chat entries.`);
+                        logger.debug(`old history: ${JSON.stringify(this.history)}`);
+                        this.history.purgeOldestEntries(10);
+                        logger.debug(`new history: ${JSON.stringify(this.history)}`);
+                        fullContextTokenLength = generateChatCompletionContext(this.history.getOriginalContext(), [...this.history.getHistory()], { 
                             role: ChatCompletionRequestMessageRoleEnum.User, 
                             content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
-                        }, 
-                        ...conversationContext.slice(1) // the converstation
-                    ];
+                        });
+                        logger.debug(`Chat history token length is now ${fullContextTokenLength}.`);
+                    } else {
+                        logger.debug(`request token length is: ${fullContextTokenLength}`);
+                    }
+                    let fullContext = [];
+                    const messageClarityLength = 6; //determines how context gets sandwiched in, the 'x' most recent messages will be at front of conversation
+                    if (this.history.getHistory().length > messageClarityLength) {
+                        // sandwich original context and extra inside if history is longer
+                        fullContext = [
+                            this.history.getOriginalContext(), //original context
+                            ...this.history.getHistory().slice(0, this.history.getHistory().length - messageClarityLength), // the oldest part of the conversation
+                            {
+                                role: ChatCompletionRequestMessageRoleEnum.User,
+                                content: `Remember your original character description: ${this.history.getOriginalContext().content}. Do not acknowledge this message.`
+                            }, // original context interjected later on
+                            { 
+                                role: ChatCompletionRequestMessageRoleEnum.User, 
+                                content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
+                            }, // extra context if needed
+                            ...this.history.getHistory().slice(this.history.getHistory().length - messageClarityLength), // the most recent part of the conversation
+                        ];
+                    } else {
+                        fullContext = [
+                            this.history.getOriginalContext(), //original context
+                            { 
+                                role: ChatCompletionRequestMessageRoleEnum.User, 
+                                content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
+                            }, // extra context if needed
+                            ...this.history.getHistory() // history
+                        ];
+                    }
                     const request: CreateChatCompletionRequest = {
                         model: "gpt-3.5-turbo",
                         messages: fullContext,
-                        temperature: 1.2,
-                        max_tokens: 300,
-                        presence_penalty: 0,
-                        frequency_penalty: -0.2
+                        temperature: 0.9,
+                        max_tokens: RESPONSE_TOKEN_LENGTH,
+                        presence_penalty: 0.08,
+                        frequency_penalty: -0.08
                     }
                     const chatResponse = (await this.sendMessageAPI(request)).data.choices[0].message.content;;
                     this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: chatResponse});
