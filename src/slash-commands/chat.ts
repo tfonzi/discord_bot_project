@@ -20,20 +20,23 @@ async function chatListener(msg: Message<boolean>) {
 
 async function endChat(client: Client, interaction: CommandInteraction) {
     const logger = Logger.getLogger();
-
     if (!Chatbot.getInstance().getChatActiveState(interaction.guildId, interaction.channelId)) {
         logger.debug(`Chat in ${interaction.guildId}-${interaction.channelId} has already ended.`)
         return;
     }
-    Chatbot.getInstance().clearChatTimer(interaction.guildId, interaction.channelId)
-    logger.debug(JSON.stringify(Chatbot.getInstance().getHistory(interaction.guildId, interaction.channelId), null, 2));
-    await interaction.followUp({ content: "*Rivanna readies herself*" });
-    await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna has to leave and says:`);
-    await DiscordClient.postMessage("*Rivanna leaves chat*", interaction.channelId);
-    Chatbot.getInstance().setChatActiveState(interaction.guildId, interaction.channelId, false);
-    if (!Chatbot.getInstance().isActive()) {
-        logger.debug("No more open chats-- shutting off listener");
-        client.off(`messageCreate`, chatListener);
+    try {
+        await interaction.followUp({ content: "*Rivanna readies herself*" });
+        
+    } finally {
+        logger.debug(JSON.stringify(Chatbot.getInstance().getHistory(interaction.guildId, interaction.channelId), null, 2));
+        await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna has to leave and says:`);
+        await DiscordClient.postMessage("*Rivanna leaves chat*", interaction.channelId);
+        Chatbot.getInstance().clearChatTimer(interaction.guildId, interaction.channelId)
+        Chatbot.getInstance().setChatActiveState(interaction.guildId, interaction.channelId, false);
+        if (!Chatbot.getInstance().isActive()) {
+            logger.debug("No more open chats-- shutting off listener");
+            client.off(`messageCreate`, chatListener);
+        } 
     }
 }
 

@@ -169,7 +169,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                         ];
                     }
                     const request: CreateChatCompletionRequest = {
-                        model: "gpt-3.5-turbo",
+                        model: "gpt-3.5-turbo-0613",
                         messages: fullContext,
                         temperature: 1.17,
                         max_tokens: RESPONSE_TOKEN_LENGTH,
