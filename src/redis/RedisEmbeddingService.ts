@@ -10,6 +10,11 @@ export interface embeddingData {
     embedding: number[]
 }
 
+export interface Memory {
+    memory: string,
+    redisKey: string
+}
+
 export interface RedisEmbeddingService {
     createClient(password: string): Promise<void>,
     deleteClient(): Promise<void>,
@@ -109,6 +114,15 @@ export class RedisEmbeddingService implements RedisEmbeddingService {
         logger.debug(`Created value at key: ${value.text.substring(0, 10)}... for index: ${indexName}`);
     }
 
+    public static async DeleteKey( key: string): Promise<void> {
+        if (!RedisEmbeddingService.instance) {
+            throw new Error("Cannot delete key: No connected client exists");
+        }
+        const logger = Logger.getLogger();
+        await RedisEmbeddingService.instance.del(key);
+        logger.debug(`Deleted value at key: ${key}`);
+    }
+
     public static async PerformVectorSimilarity(indexName: string, embedding: number[]): Promise<string[]> {
         return RedisEmbeddingService.instance.ft.search(`idx:${indexName}`, '*=>[KNN 10 @embedding $BLOB AS dist]', {
             PARAMS: {
@@ -125,5 +139,13 @@ export class RedisEmbeddingService implements RedisEmbeddingService {
         // .keys is bad performance wise but shouldn't be a problem yet given small scale
         return RedisEmbeddingService.instance.keys(`noderedis:${indexName}:*`)
         .then(res => res ? res.map(key => key.replace(`noderedis:${indexName}:`, "")) : []);
+    }
+
+    public static async GetMemories(indexName: string): Promise<Memory[]> {
+        // .keys is bad performance wise but shouldn't be a problem yet given small scale
+        return RedisEmbeddingService.instance.keys(`noderedis:${indexName}:*`)
+        .then(res => res ? res.map(key => {
+            return { memory: key.replace(`noderedis:${indexName}:`, ""), redisKey: key}
+        }) : []);
     }
 }

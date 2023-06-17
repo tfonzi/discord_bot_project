@@ -11,8 +11,12 @@ const handleSlashCommand = async (client: Client, interaction: CommandInteractio
             interaction.followUp({ content: "An error has occurred" });
             return;
         }
-        await interaction.deferReply();
-        
+        // set ephemeral state at deferment
+        if (interaction.commandName === "manage-memories") {
+            await interaction.deferReply({ephemeral: true});
+        } else {
+            await interaction.deferReply();
+        }
         logger.log(`[channel-${interaction.channelId}] Received a command: ${interaction.commandName}`);
         if (interaction.command.options){
             logger.debug(`[channel-${interaction.channelId}] Command options were: ${JSON.stringify(interaction.options, null, 2)}`)
