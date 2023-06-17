@@ -25,7 +25,7 @@ services:
     restart: always
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes --appendfilename "embeddings.aof" --dir ./data --loglevel warning --requirepass "${REDIS_PASSWORD}" --loadmodule /opt/redis-stack/lib/redisearch.so --loadmodule /opt/redis-stack/lib/rejson.so
+    command: redis-server --save "" --appendonly yes --appendfilename "embeddings.aof" --dir ./data --loglevel warning --requirepass "${REDIS_PASSWORD}" --loadmodule /opt/redis-stack/lib/redisearch.so --loadmodule /opt/redis-stack/lib/rejson.so
     volumes:
       - ./redis-volume:/data
   

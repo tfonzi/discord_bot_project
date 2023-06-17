@@ -4,10 +4,10 @@ import { encode } from "gpt-3-encoder"
 import { Mutex } from 'async-mutex';
 import { AxiosResponse } from "axios";
 
-import { DiscordClient } from "../discordClient";
+import { DiscordClient } from "../utils/discordClient";
 import { RedisEmbeddingService } from "../redis/RedisEmbeddingService";
 import { Logger } from "../logger/logger";
-import { delay } from "../utils";
+import { delay } from "../utils/utils";
 
 const COLLECT_TIMER = 3000; //collect after 3 second
 const RESPONSE_TOKEN_LENGTH = 300;

@@ -4,7 +4,7 @@ import * as dotenv from "dotenv";
 import ready from "./listeners/ready";
 import interactionCreate from "./listeners/interactionCreate";
 import { Chatbot } from "./chat-ai/chat-bot";
-import { DiscordClient } from "./discordClient";
+import { DiscordClient } from "./utils/discordClient";
 import { RedisEmbeddingService } from "./redis/RedisEmbeddingService";
 import { Logger, isLogLevel } from "./logger/logger";
 

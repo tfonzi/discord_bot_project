@@ -1,5 +1,5 @@
 import { Client, ClientOptions, TextChannel } from "discord.js";
-import { Logger } from "./logger/logger";
+import { Logger } from "../logger/logger";
 import { delay } from "./utils";
 
 export interface DiscordClient {

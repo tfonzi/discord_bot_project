@@ -2,7 +2,7 @@ import { ApplicationCommandType, Client, CommandInteraction, Message, TextChanne
 
 import { Command } from "./command";
 import { Chatbot } from "../chat-ai/chat-bot";
-import { DiscordClient } from "../discordClient";
+import { DiscordClient } from "../utils/discordClient";
 import { Logger } from "../logger/logger";
 
 const CHAT_TIMER = 900000; //end chat after 15 minutes, aka 900000
