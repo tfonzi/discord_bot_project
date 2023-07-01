@@ -15,6 +15,11 @@ export interface Memory {
     redisKey: string
 }
 
+export interface VectorSimilarityResult {
+    result: string,
+    similarity: number
+}
+
 export interface RedisEmbeddingService {
     createClient(password: string): Promise<void>,
     deleteClient(): Promise<void>,
@@ -123,7 +128,7 @@ export class RedisEmbeddingService implements RedisEmbeddingService {
         logger.debug(`Deleted value at key: ${key}`);
     }
 
-    public static async PerformVectorSimilarity(indexName: string, embedding: number[]): Promise<string[]> {
+    public static async PerformVectorSimilarity(indexName: string, embedding: number[]): Promise<VectorSimilarityResult[]> {
         return RedisEmbeddingService.instance.ft.search(`idx:${indexName}`, '*=>[KNN 10 @embedding $BLOB AS dist]', {
             PARAMS: {
                 BLOB: float32Buffer(embedding)
@@ -132,7 +137,9 @@ export class RedisEmbeddingService implements RedisEmbeddingService {
             DIALECT: 2,
             RETURN: ['dist']
         })
-        .then(res => res.documents.map(document => document.id.replace(`noderedis:${indexName}:`, "")));
+        .then(res => res.documents.map((document): VectorSimilarityResult => {
+            return { result: document.id.replace(`noderedis:${indexName}:`, ""), similarity: (document.value["dist"] as number)};
+        }));
     }
 
     public static async GetIndexKeys(indexName: string): Promise<string[]> {

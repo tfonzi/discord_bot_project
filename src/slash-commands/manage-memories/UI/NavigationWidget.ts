@@ -95,7 +95,7 @@ export function CreateListWidget(memories: Memory[], page: number, pagination: n
     const components: ActionRowBuilder<ButtonBuilder>[] = [];
     for (let i = 0; i < choices; i = i + 1) {
         const memory = memories[(page * pagination) + i].memory;
-        const memoryText = memory.length < 30 ? memory : `${memory.substring(0,30)}...`;
+        const memoryText = memory.length < 30 ? memory : `${memory.substring(0,50)}...`;
         content = content + `${emojis[i]} : "${memoryText}"\n`
         if (i == 0) {
             components.push(new ActionRowBuilder<ButtonBuilder>())

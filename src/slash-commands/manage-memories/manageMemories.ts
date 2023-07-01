@@ -8,13 +8,13 @@ import { ButtonId, ConfirmDeleteWidget, CreateListWidget, NavigationWidget } fro
 
 export const ManageMemories: Command = {
     name: "manage-memories",
-    description: "Publicly view or delete memories taught to Rivanna!",
+    description: "View or publicly delete memories taught to Rivanna!",
     type: ApplicationCommandType.ChatInput,
     run: async (client: Client, interaction: CommandInteraction) => {
         const logger = Logger.getLogger();
 
         logger.debug("entered memory management interaction");
-        const memories = await RedisEmbeddingService.GetMemories(interaction.guildId);
+        let memories = await RedisEmbeddingService.GetMemories(interaction.guildId);
         logger.debug(`memories:  ${JSON.stringify(memories)}`);
         let index = 0;
 
@@ -55,10 +55,11 @@ export const ManageMemories: Command = {
             } else if (i.customId === ButtonId.Delete) {
                 await interaction.editReply({content: `Are you sure you want to erase this memory?\n\n "${memories[index].memory}"`, components: ConfirmDeleteWidget});
             } else if (i.customId === ButtonId.ConfirmDelete) {
-                await interaction.editReply({content: "Operation successful. Thank you!", components: []});
                 await RedisEmbeddingService.DeleteKey(memories[index].redisKey);
-                await DiscordClient.postMessage(`Rivanna has forgotten this memory (via ${interaction.user.username}):\n\n"${memories[index].memory}"`, interaction.channelId);
-                collector.stop();
+                // refresh memories
+                await DiscordClient.postMessage(`Rivanna has forgotten this memory (via ${interaction.user.username}):\n"${memories[index].memory}"`, interaction.channelId);
+                memories = await RedisEmbeddingService.GetMemories(interaction.guildId);
+                await interaction.editReply({ content: generateContentText(0, memories), components: NavigationWidget});
             } else if (i.customId === ButtonId.DenyDelete) {
                 await interaction.editReply({ content: generateContentText(index, memories), components: NavigationWidget});
             } else if (i.customId === ButtonId.Cancel) {

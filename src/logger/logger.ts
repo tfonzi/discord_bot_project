@@ -3,10 +3,10 @@ import { serializeError } from "serialize-error";
 
 const FILE_PATH = "./logs/bot.log"
 
-type LogLevel = "DEBUG" | "INFO"
+type LogLevel = "DEBUG" | "INFO" | "VERBOSE"
 
 export function isLogLevel(a: string): a is LogLevel {
-    return ((a as LogLevel) === "DEBUG") || ((a as LogLevel) === "INFO");
+    return ((a as LogLevel) === "DEBUG") || ((a as LogLevel) === "INFO") || ((a as LogLevel) === "VERBOSE");
 }
 
 export interface Logger {
@@ -32,8 +32,16 @@ export class Logger implements Logger {
     }
 
     debug(text: string) {
-        if (this.logLevel == "DEBUG") {
+        if (this.logLevel == "DEBUG" || this.logLevel == "VERBOSE") {
             const formatted = `${(new Date(Date.now())).toISOString()} [Debug] ${text} \n`
+            this.logStream.write(formatted);
+            console.debug(formatted);
+        }
+    }
+
+    verbose(text: string) {
+        if (this.logLevel == "VERBOSE") {
+            const formatted = `${(new Date(Date.now())).toISOString()} [Verbose] ${text} \n`
             this.logStream.write(formatted);
             console.debug(formatted);
         }

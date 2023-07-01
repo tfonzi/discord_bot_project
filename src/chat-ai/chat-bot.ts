@@ -5,7 +5,7 @@ import { Mutex } from 'async-mutex';
 import { AxiosResponse } from "axios";
 
 import { DiscordClient } from "../utils/discordClient";
-import { RedisEmbeddingService } from "../redis/RedisEmbeddingService";
+import { RedisEmbeddingService, VectorSimilarityResult } from "../redis/RedisEmbeddingService";
 import { Logger } from "../logger/logger";
 import { delay } from "../utils/utils";
 
@@ -54,6 +54,14 @@ class MessageHistory implements MessageHistory { // MessageHistory class -- modi
             this.storage.splice(0, x);
         }
     }
+
+    makeCopy(): MessageHistory { 
+      const copy = new MessageHistory(this.context, this.capacity)
+      this.storage.forEach(msg => {
+        copy.addMessage(msg);
+      })
+      return copy;
+    }
 }
 
 interface MessageProcessor {
@@ -64,6 +72,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
     private requestBasket: string[] = []; //basket for storing requests
     private responseBasket: string[] = []; //basket for generating response
     private isCollecting: boolean;
+    private collectingTimer: NodeJS.Timeout
     private mutex: Mutex;
 
     constructor(private history: MessageHistory, private openAi: OpenAIApi) {
@@ -71,18 +80,18 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         this.isCollecting = false;
     }
 
-    private async sendMessageAPI(request: CreateChatCompletionRequest, attempts: number = 0): Promise<AxiosResponse<CreateChatCompletionResponse, any>> {
+    private async sendWithRetry(request: CreateChatCompletionRequest, attempts: number = 0): Promise<AxiosResponse<CreateChatCompletionResponse, any>> {
         const logger = Logger.getLogger();
         try {
-            logger.debug(`sent request: ${JSON.stringify(request, null, 2)}`);
+            logger.verbose(`sent request: ${JSON.stringify(request, null, 2)}`);
             const response = await this.openAi.createChatCompletion(request);
-            logger.debug(`received response: ${JSON.stringify(response.data, null, 2)}`);
+            logger.verbose(`received response: ${JSON.stringify(response.data, null, 2)}`);
             return response
         } catch (err) {
             logger.error(err as Error);
             if (attempts < 3) { // 3 attempts
                 await delay(100);
-                return await this.sendMessageAPI(request, attempts + 1);
+                return await this.sendWithRetry(request, attempts + 1);
             } else {
                 throw err;
             }
@@ -107,80 +116,29 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
             await DiscordClient.sendTyping(channelId);
             this.isCollecting = true;
-            logger.debug(`[channel-${channelId}] Collecting chat entries. Bucketed first chat entry`)
-            await new Promise(resolve => setTimeout(resolve, COLLECT_TIMER)); // blocks until timer ends
+            logger.debug(`[channel-${channelId}] Collecting chat entries. Bucketed first chat entry. Started timer!`)
+            await new Promise(resolve => {
+                this.collectingTimer = setTimeout(resolve, COLLECT_TIMER)
+            }); // blocks until timer ends
+            logger.debug(`[channel-${channelId}] Timer has completed!`)
             release = await this.mutex.acquire();
             try {
                 if (this.responseBasket.length > 0) {
                     // extract extraContext out given messages.
                     const guildId = DiscordClient.getGuildId(channelId);
                     await RedisEmbeddingService.CreateIndexForEmbedding(guildId); // no-op if index has already been created
-                    const extraContext = await Promise.all((this.responseBasket.map(async (message) => {
+
+                    // add current message to history
+                    this.responseBasket.forEach(async (message) => {
                         this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: message});
-                        return RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(message)));
-                    }))).then(res => {
-                        return res.reduce((a: string, v: string[]) => {
-                            v.forEach((i) => { a = a.concat(`${i}. `); });
-                            return a;
-                        }, '"Here is some additional context that may help you with your acting: ');
                     });
-                    let fullContextTokenLength = generateChatCompletionContext(this.history.getOriginalContext(), [...this.history.getHistory()], { 
-                        role: ChatCompletionRequestMessageRoleEnum.User, 
-                        content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
-                    });
-                    if ((fullContextTokenLength + 100 + RESPONSE_TOKEN_LENGTH > 4000)) { // if chat tokens is greater than 4000, we need to purge some of our chat history.
-                        logger.debug(`Chat history token length is ${fullContextTokenLength}. Purging oldest 10 chat entries.`);
-                        logger.debug(`old history: ${JSON.stringify(this.history)}`);
-                        this.history.purgeOldestEntries(10);
-                        logger.debug(`new history: ${JSON.stringify(this.history)}`);
-                        fullContextTokenLength = generateChatCompletionContext(this.history.getOriginalContext(), [...this.history.getHistory()], { 
-                            role: ChatCompletionRequestMessageRoleEnum.User, 
-                            content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
-                        });
-                        logger.debug(`Chat history token length is now ${fullContextTokenLength}.`);
-                    } else {
-                        logger.debug(`request token length is: ${fullContextTokenLength}`);
-                    }
-                    let fullContext = [];
-                    const messageClarityLength = 6; //determines how context gets sandwiched in, the 'x' most recent messages will be at front of conversation
-                    if (this.history.getHistory().length > messageClarityLength) {
-                        // sandwich original context and extra inside if history is longer
-                        fullContext = [
-                            this.history.getOriginalContext(), //original context
-                            ...this.history.getHistory().slice(0, this.history.getHistory().length - messageClarityLength), // the oldest part of the conversation
-                            {
-                                role: ChatCompletionRequestMessageRoleEnum.User,
-                                content: `Remember your original character description: ${this.history.getOriginalContext().content}. Do not acknowledge this message.`
-                            }, // original context interjected later on
-                            { 
-                                role: ChatCompletionRequestMessageRoleEnum.User, 
-                                content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
-                            }, // extra context if needed
-                            ...this.history.getHistory().slice(this.history.getHistory().length - messageClarityLength), // the most recent part of the conversation
-                        ];
-                    } else {
-                        fullContext = [
-                            this.history.getOriginalContext(), //original context
-                            { 
-                                role: ChatCompletionRequestMessageRoleEnum.User, 
-                                content: `${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
-                            }, // extra context if needed
-                            ...this.history.getHistory() // history
-                        ];
-                    }
-                    const request: CreateChatCompletionRequest = {
-                        model: "gpt-3.5-turbo-0613",
-                        messages: fullContext,
-                        temperature: 1.17,
-                        max_tokens: RESPONSE_TOKEN_LENGTH,
-                        presence_penalty: 0.08,
-                        frequency_penalty: -0.08
-                    }
-                    const chatResponse = (await this.sendMessageAPI(request)).data.choices[0].message.content;;
-                    this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: chatResponse});
+                    this.responseBasket = []; // refresh responseBasket
+
+                    await DiscordClient.sendTyping(channelId);
+                    const chatResponse = await this.sendMessageToAPI(this.history, (await this.generateExtraContext(guildId, this.history)))
+
                     await DiscordClient.postMessage(chatResponse.replace("Rivanna:", ""), channelId);
                     logger.log(`[channel-${channelId}] [Bot] "${chatResponse}"`)
-                    this.responseBasket = []; // refresh responseBasket
                 }
             } finally {
                 logger.debug(`[channel-${channelId}] Done collecting chat entries`)
@@ -188,9 +146,131 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                 release();
             }
         } else {
-            logger.debug(`[channel-${channelId}] Bucketed chat entry.`)
+            logger.debug(`[channel-${channelId}] Bucketed chat entry, refreshing timer!.`)
+            await DiscordClient.sendTyping(channelId);
+            this.collectingTimer.refresh()
         }
         // if we are currently collecting messages, then adding to responseBasket was enough. Rest of function is no-op
+    }
+
+    async generateExtraContext(guildId: string, history: MessageHistory): Promise<string> {
+        const logger = Logger.getLogger();
+        const contextMessages: string[] = [];
+        const historyMessageStrings = history.getHistory().map(msg => msg.content);
+        const historyContextClarity = 7 // number of messages in history to generate context off from
+        if (historyMessageStrings.length > historyContextClarity) {
+            contextMessages.push(...(historyMessageStrings.slice(historyMessageStrings.length - historyContextClarity)))
+        } else {
+            contextMessages.push(...historyMessageStrings)
+        }
+
+        logger.debug(`Generating context from the following messages: ${JSON.stringify(contextMessages)}`)
+
+        let extraContextMap = new Map<string, VectorSimilarityResult>();
+        (await Promise.all((contextMessages.reverse().map(async (message, index) => {
+            let vectorSimilarityResult = await RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(message)));
+            vectorSimilarityResult = vectorSimilarityResult.map((result) => {
+                return {result: result.result, similarity: result.similarity * (1 - 0.05*index)};
+            });
+            return vectorSimilarityResult;
+        })))).flat().forEach(result => {
+            // add new ones to map, add existing ones only if similarity is greater
+            if (!extraContextMap.has(result.result)) {
+                extraContextMap.set(result.result, result)
+            } else {
+                const current = extraContextMap.get(result.result)
+                if (current.similarity < result.similarity) {
+                    extraContextMap.set(result.result, result)
+                }
+            }
+        });
+
+        let extraContentString = [...extraContextMap.values()].sort((a,b) => b.similarity- a.similarity).slice(0,10).reduce((a: string, v: VectorSimilarityResult) => {
+            a = a.concat(`${v.result}. `);
+            return a;
+        }, '');
+
+        // make copy of history, we will send a message to the API, see the response, and generate content based on that too.
+        const historyCopy = history.makeCopy()
+
+        let chatResponse = await this.sendMessageToAPI(historyCopy, extraContentString);
+        logger.debug(`Generating additional context from what we think Rivanna will say: ${chatResponse}`);
+        (await RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(chatResponse)))).forEach(result => {
+            result = {result: result.result, similarity: result.similarity*0.80}
+            // add new ones to map, add existing ones only if similarity is greater
+            if (!extraContextMap.has(result.result)) {
+                extraContextMap.set(result.result, result)
+            } else {
+                const current = extraContextMap.get(result.result)
+                if (current.similarity < result.similarity) {
+                    extraContextMap.set(result.result, result)
+                }
+            }
+        });
+
+        const extraContext = [...extraContextMap.values()].sort((a,b) => b.similarity- a.similarity).slice(0,10);
+        logger.debug(`Generating context based on the 10 following memories: ${JSON.stringify(extraContext)}`)
+        extraContentString = extraContext.reduce((a: string, v: VectorSimilarityResult) => {
+            a = a.concat(`${v.result}. `);
+            return a;
+        }, '');
+        logger.debug(`Generated context string: ${extraContentString}`)
+
+        return extraContentString;
+    }
+
+    async sendMessageToAPI(history: MessageHistory, extraContext: string) {
+        const extraContextRequest: ChatCompletionRequestMessage = { 
+            role: ChatCompletionRequestMessageRoleEnum.User, 
+            content: `"Here is some additional context that may help you with your acting: ${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
+        }
+        
+        this.purgeHistoryIfNeeded(history, extraContextRequest);
+
+        // Reorganize conversation order based on clarity length
+        let fullContext: ChatCompletionRequestMessage[] = [];
+        const messageClarityLength = 3; //determines how context gets sandwiched in, the 'x' most recent messages will be at front of conversation
+        if (history.getHistory().length > messageClarityLength) {
+            // sandwich original context and extra inside if history is longer
+            fullContext = [
+                history.getOriginalContext(), //original context
+                ...history.getHistory().slice(0, history.getHistory().length - messageClarityLength), // the oldest part of the conversation
+                extraContextRequest, // extra context if needed
+                ...history.getHistory().slice(history.getHistory().length - messageClarityLength), // the most recent part of the conversation
+            ];
+        } else {
+            fullContext = [
+                history.getOriginalContext(), //original context
+                extraContextRequest, // extra context if needed
+                ...history.getHistory() // history
+            ];
+        }
+
+        // Send message and get response back
+        const request: CreateChatCompletionRequest = {
+            model: "gpt-3.5-turbo-0613",
+            messages: fullContext,
+            temperature: 1.17,
+            max_tokens: RESPONSE_TOKEN_LENGTH,
+            presence_penalty: 0.08,
+            frequency_penalty: -0.08
+        }
+        const chatResponse = (await this.sendWithRetry(request)).data.choices[0].message.content;
+        history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: chatResponse});
+        return chatResponse;
+    }
+
+    async purgeHistoryIfNeeded(history: MessageHistory, extraContext: ChatCompletionRequestMessage) {
+        const logger = Logger.getLogger();
+        let fullContextTokenLength = generateChatCompletionContext(history.getOriginalContext(), [...history.getHistory()], extraContext);
+        if ((fullContextTokenLength + 100 + RESPONSE_TOKEN_LENGTH > 4000)) { // if chat tokens is greater than 4000, we need to purge some of our chat history.
+            logger.debug(`Chat history token length is ${fullContextTokenLength}. Purging oldest 10 chat entries.`);
+            logger.debug(`old history: ${JSON.stringify(history)}`);
+            history.purgeOldestEntries(10);
+            logger.debug(`new history: ${JSON.stringify(history)}`);
+            fullContextTokenLength = generateChatCompletionContext(history.getOriginalContext(), [...history.getHistory()], extraContext);
+            logger.debug(`Chat history token length is now ${fullContextTokenLength}.`);
+        }
     }
 }
 
@@ -201,8 +281,10 @@ export interface Chatbot {
     getChatActiveState(guildId: string, channelId: string): boolean,
     isActive(): boolean,
     setChatTimer(guildId: string, channelId: string, timer: NodeJS.Timeout): void,
+    refreshChatTimer(guildId: string, channelId: string): void,
     clearChatTimer(guildId: string, channelId: string): void,
     getHistory(guildId: string, channelId: string): MessageHistory,
+    resetHistory(guildId: string, channelId: string): void,
     createEmbedding(text: string): Promise<number[]>
 }
 
@@ -214,6 +296,7 @@ export class Chatbot implements Chatbot {
     private openai: OpenAIApi;
     private context: ChatCompletionRequestMessage;
     private processers: Map<string, MessageProcessor>
+    private embeddingsCache: Map<string, number[]>
     public userName: string;
 
     private constructor() {
@@ -221,6 +304,7 @@ export class Chatbot implements Chatbot {
         this.activeChats = [];
         this.activeChatTimers = new Map<string, NodeJS.Timeout>();
         this.processers = new Map<string, MessageProcessor>();
+        this.embeddingsCache = new Map<string, number[]>();
     }
 
     private static EnsureExistance(){
@@ -259,6 +343,14 @@ export class Chatbot implements Chatbot {
         }
     }
 
+    resetHistory(guildId: string, channelId: string): void {
+        if (this.messageHistories.has(`${guildId}-${channelId}`)) {
+            this.messageHistories.delete(`${guildId}-${channelId}`);
+        } else {
+            throw new Error("There is no history for this chat!")
+        }
+    }
+
     setChatActiveState(guildId: string, channelId: string, state: boolean) {
         const logger = Logger.getLogger();
         logger.debug(`Set ${guildId}-${channelId} to ${state}`);
@@ -285,6 +377,13 @@ export class Chatbot implements Chatbot {
         this.activeChatTimers.set(`${guildId}-${channelId}`, timer );
     }
 
+    refreshChatTimer(guildId: string, channelId: string): void {
+        if (!this.activeChatTimers.has(`${guildId}-${channelId}`)) {
+            throw new Error("There is no timer to refresh!")
+        }
+        this.activeChatTimers.get(`${guildId}-${channelId}`).refresh();
+    }
+
     clearChatTimer(guildId: string, channelId: string): void {
         if (!this.activeChatTimers.has(`${guildId}-${channelId}`)) {
             throw new Error("There is no timer to clear!")
@@ -309,6 +408,7 @@ export class Chatbot implements Chatbot {
                 this.processers.set(`${guildId}-${channelId}`, new MessageProcessor(this.messageHistories.get(`${guildId}-${channelId}`), this.openai));
             }
             await this.processers.get(`${guildId}-${channelId}`).processMessage(msg, channelId);
+            await this.refreshChatTimer(guildId, channelId);
         }
         catch(err) {
             logger.error(err);
@@ -319,10 +419,18 @@ export class Chatbot implements Chatbot {
     async createEmbedding(text: string, attempts: number = 0): Promise<number[]> {
         const logger = Logger.getLogger();
         try {
-            return (await this.openai.createEmbedding({
+            if (this.embeddingsCache.has(text)) {
+                logger.debug("Embedding was cached!")
+                return this.embeddingsCache.get(text);
+            }
+            // cache embedding result so we don't have to do unneccesary API calls
+            const embedding = (await this.openai.createEmbedding({
                 model: "text-embedding-ada-002",
                 input: text
             })).data.data[0].embedding;
+
+            this.embeddingsCache.set(text, embedding)
+            return embedding
         } catch(err) {
             logger.error(err);
             if (attempts < 3) {
