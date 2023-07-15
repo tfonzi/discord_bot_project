@@ -48,7 +48,8 @@ export class Logger implements Logger {
     }
 
     error(error: Error) {
-        const formatted = `${(new Date(Date.now())).toISOString()} [Error] ${JSON.stringify(serializeError(error), null, 2)} \n`
+        const serializedError = serializeError(error);
+        const formatted = `${(new Date(Date.now())).toISOString()} [Error] ${JSON.stringify({name: serializedError.name, code: serializedError.code, message: serializedError.message}, null, 2)} \n`
         this.logStream.write(formatted);
         console.error(formatted);
     }

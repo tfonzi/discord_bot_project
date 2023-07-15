@@ -63,7 +63,7 @@ export const ChatStart: Command = {
             ephemeral: false,
             content: `*Rivanna enters chat*`
         });
-        await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna walks in and she says:`);
+        await Chatbot.getInstance().sendMessage(interaction.guildId, interaction.channelId, `Rivanna walks in and she greets the room:`);
     }
 }
 

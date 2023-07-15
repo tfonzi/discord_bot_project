@@ -1,4 +1,5 @@
 .env
+env*
 .context
 node_modules/*
 dist/*

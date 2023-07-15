@@ -1,5 +1,4 @@
 import { CreateChatCompletionRequest, ChatCompletionRequestMessage, ChatCompletionRequestMessageRoleEnum, Configuration, OpenAIApi, CreateChatCompletionResponse } from "openai"
-import { TextChannel } from "discord.js";
 import { encode } from "gpt-3-encoder"
 import { Mutex } from 'async-mutex';
 import { AxiosResponse } from "axios";
@@ -9,8 +8,13 @@ import { RedisEmbeddingService, VectorSimilarityResult } from "../redis/RedisEmb
 import { Logger } from "../logger/logger";
 import { delay } from "../utils/utils";
 
-const COLLECT_TIMER = 3000; //collect after 3 second
+const COLLECT_TIMER = 5000; //collect after 3 second
 const RESPONSE_TOKEN_LENGTH = 300;
+
+type ChatBotResponse = {
+    shouldRespond: boolean,
+    response: string
+}
 
 function generateChatCompletionContext(originalContext: ChatCompletionRequestMessage, chatHistory: ChatCompletionRequestMessage[], extraContext: ChatCompletionRequestMessage): number {
     const originalContextTokenLength = encode(originalContext.content).length;
@@ -83,7 +87,8 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
     private async sendWithRetry(request: CreateChatCompletionRequest, attempts: number = 0): Promise<AxiosResponse<CreateChatCompletionResponse, any>> {
         const logger = Logger.getLogger();
         try {
-            logger.verbose(`sent request: ${JSON.stringify(request, null, 2)}`);
+            request.messages.push({role: "user", content: "Create a response object based on the past conversation."})
+            logger.verbose(`sent request: ${JSON.stringify(request, null, 2)}`);;
             const response = await this.openAi.createChatCompletion(request);
             logger.verbose(`received response: ${JSON.stringify(response.data, null, 2)}`);
             return response
@@ -114,7 +119,6 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         }
         let result = undefined;
         if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
-            await DiscordClient.sendTyping(channelId);
             this.isCollecting = true;
             logger.debug(`[channel-${channelId}] Collecting chat entries. Bucketed first chat entry. Started timer!`)
             await new Promise(resolve => {
@@ -133,12 +137,15 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                         this.history.addMessage({role: ChatCompletionRequestMessageRoleEnum.User, content: message});
                     });
                     this.responseBasket = []; // refresh responseBasket
-
-                    await DiscordClient.sendTyping(channelId);
-                    const chatResponse = await this.sendMessageToAPI(this.history, (await this.generateExtraContext(guildId, this.history)))
-
-                    await DiscordClient.postMessage(chatResponse.replace("Rivanna:", ""), channelId);
-                    logger.log(`[channel-${channelId}] [Bot] "${chatResponse}"`)
+                    const extraContext = await this.generateExtraContext(guildId, this.history);
+                    if (extraContext) {
+                        DiscordClient.sendTyping(channelId);
+                    }
+                    const chatResponse = await this.sendMessageToAPI("gpt-4", this.history, extraContext)
+                    if(chatResponse.shouldRespond) {
+                        await DiscordClient.postMessage(chatResponse.response.replace("Rivanna:", ""), channelId);
+                        logger.log(`[channel-${channelId}] [Bot] "${chatResponse}"`)
+                    }
                 }
             } finally {
                 logger.debug(`[channel-${channelId}] Done collecting chat entries`)
@@ -147,7 +154,6 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
             }
         } else {
             logger.debug(`[channel-${channelId}] Bucketed chat entry, refreshing timer!.`)
-            await DiscordClient.sendTyping(channelId);
             this.collectingTimer.refresh()
         }
         // if we are currently collecting messages, then adding to responseBasket was enough. Rest of function is no-op
@@ -185,7 +191,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
             }
         });
 
-        let extraContentString = [...extraContextMap.values()].sort((a,b) => b.similarity- a.similarity).slice(0,10).reduce((a: string, v: VectorSimilarityResult) => {
+        let extraContentString = [...extraContextMap.values()].sort((a,b) => b.similarity - a.similarity).slice(0,10).reduce((a: string, v: VectorSimilarityResult) => {
             a = a.concat(`${v.result}. `);
             return a;
         }, '');
@@ -193,9 +199,12 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         // make copy of history, we will send a message to the API, see the response, and generate content based on that too.
         const historyCopy = history.makeCopy()
 
-        let chatResponse = await this.sendMessageToAPI(historyCopy, extraContentString);
-        logger.debug(`Generating additional context from what we think Rivanna will say: ${chatResponse}`);
-        (await RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(chatResponse)))).forEach(result => {
+        let chatResponse = await this.sendMessageToAPI("gpt-4", historyCopy, extraContentString);
+        if (!chatResponse.shouldRespond) {
+            return "";
+        }
+        logger.debug(`Generating additional context from what we think Rivanna will say: ${chatResponse.response}`);
+        (await RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(chatResponse.response)))).forEach(result => {
             result = {result: result.result, similarity: result.similarity*0.80}
             // add new ones to map, add existing ones only if similarity is greater
             if (!extraContextMap.has(result.result)) {
@@ -208,7 +217,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
             }
         });
 
-        const extraContext = [...extraContextMap.values()].sort((a,b) => b.similarity- a.similarity).slice(0,10);
+        const extraContext = [...extraContextMap.values()].sort((a,b) => b.similarity - a.similarity).slice(0,10);
         logger.debug(`Generating context based on the 10 following memories: ${JSON.stringify(extraContext)}`)
         extraContentString = extraContext.reduce((a: string, v: VectorSimilarityResult) => {
             a = a.concat(`${v.result}. `);
@@ -219,7 +228,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         return extraContentString;
     }
 
-    async sendMessageToAPI(history: MessageHistory, extraContext: string) {
+    async sendMessageToAPI(model: string, history: MessageHistory, extraContext: string): Promise<ChatBotResponse> {
         const extraContextRequest: ChatCompletionRequestMessage = { 
             role: ChatCompletionRequestMessageRoleEnum.User, 
             content: `"Here is some additional context that may help you with your acting: ${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
@@ -248,15 +257,49 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
 
         // Send message and get response back
         const request: CreateChatCompletionRequest = {
-            model: "gpt-3.5-turbo-0613",
+            model: model,
             messages: fullContext,
             temperature: 1.17,
             max_tokens: RESPONSE_TOKEN_LENGTH,
             presence_penalty: 0.08,
-            frequency_penalty: -0.08
+            frequency_penalty: -0.08,
+            functions: [
+                {
+                  "name": "CreateResponseObject",
+                  "description": "Creates a response object based on past conversation",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "shouldRespond": {
+                        "type": "boolean",
+                        "description": "Based on the conversation, whether Rivanna should respond at all."
+                      },
+                      "response": {
+                        "type": "string",
+                        "description": "If Rivanna chose to respond, this is her response."
+                      }
+                    },
+                    "required": ["shouldRespond"]
+                  }
+                }
+              ]
         }
-        const chatResponse = (await this.sendWithRetry(request)).data.choices[0].message.content;
-        history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: chatResponse});
+        const response = (await this.sendWithRetry(request)).data.choices[0].message
+        let chatResponse: ChatBotResponse;
+        try {
+            if (response.function_call) {
+                chatResponse = JSON.parse(response.function_call.arguments)
+            } else if (response.content) {
+                chatResponse = JSON.parse(response.content)
+            } else {
+                throw new Error(`function_call and content properties are both missing`)
+            }
+        } catch (err) {
+            throw new Error(`Unable to parse GPT response, response: ${JSON.stringify(response, null, 2)}, error: ${(err as Error).message}}`)
+        }
+        if (chatResponse.shouldRespond) {
+            history.addMessage({role: ChatCompletionRequestMessageRoleEnum.Assistant, content: chatResponse.response});
+        }
         return chatResponse;
     }
 
