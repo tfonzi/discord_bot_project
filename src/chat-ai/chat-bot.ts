@@ -493,7 +493,7 @@ export class Chatbot implements Chatbot {
         }
         catch(err) {
             logger.error(err);
-            DiscordClient.postMessage("Sorry! I'm having trouble thinking of a response right now. Please try later.", channelId);
+            DiscordClient.postMessage("...", channelId);
         }
     }
 
