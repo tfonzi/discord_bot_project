@@ -57,7 +57,7 @@ interface MessageHistory {
 class MessageHistory implements MessageHistory { // MessageHistory class -- modified queue for storing message history for Chatbot
     private storage: ChatCompletionMessageParam[] = [];
 
-    constructor(private context: ChatCompletionMessageParam, private capacity: number = 50) {}
+    constructor(private context: ChatCompletionMessageParam, private capacity: number = 100) {}
 
     addMessage(msg: ChatCompletionMessageParam): void {
 
@@ -173,9 +173,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                     });
                     this.responseBasket = []; // refresh responseBasket
                     const extraContext = await this.generateExtraContext(guildId, this.history);
-                    if (extraContext) {
-                        DiscordClient.sendTyping(channelId);
-                    }
+                    DiscordClient.sendTyping(channelId);
                     const chatResponse = await this.sendMessageToAPI("gpt-4-1106-preview", this.history, extraContext)
                     if(chatResponse.shouldRespond) {
                         await DiscordClient.postMessage(chatResponse.response.replace("Rivanna:", ""), channelId);
