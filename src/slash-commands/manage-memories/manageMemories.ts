@@ -16,6 +16,12 @@ export const ManageMemories: Command = {
         logger.debug("entered memory management interaction");
         let memories = await RedisEmbeddingService.GetMemories(interaction.guildId);
         logger.debug(`memories:  ${JSON.stringify(memories)}`);
+        if (memories.length == 0) {
+            await interaction.followUp({
+                content: "There are no memories currently! Please create one with the /teach command."
+            });
+            return;
+        }
         let index = 0;
 
         function generateContentText(index: number, memories: Memory[]): string {

@@ -17,7 +17,7 @@
     "discord.js": "^14.10.2",
     "dotenv": "^16.0.3",
     "gpt-3-encoder": "^1.1.4",
-    "openai": "^3.3.0",
+    "openai": "^4.20.0",
     "redis": "^4.6.6",
     "serialize-error": "^7.0.0"
   }

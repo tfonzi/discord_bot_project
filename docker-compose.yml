@@ -2,6 +2,7 @@ services:
   bot:
     build: "."
     container_name: bot
+    restart: on-failure:10
     networks:
       botNetwork:
         aliases:
