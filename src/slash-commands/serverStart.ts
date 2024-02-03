@@ -11,7 +11,7 @@ export const ServerStart: Command = {
         const logger = Logger.getLogger();
 
         logger.debug("starting server");
-        const resp = await fetch('https://wiafplieq9.execute-api.us-east-2.amazonaws.com/start')    
+        const resp = await fetch('https://ri2pgnvtdk.execute-api.us-east-1.amazonaws.com/start')    
 
         await interaction.followUp({
             ephemeral: false,

@@ -11,7 +11,7 @@ export const ServerStop: Command = {
         const logger = Logger.getLogger();
 
         logger.debug("stopping server");
-        const resp = await fetch('https://wiafplieq9.execute-api.us-east-2.amazonaws.com/stop')    
+        const resp = await fetch('https://ri2pgnvtdk.execute-api.us-east-1.amazonaws.com/stop')    
 
         await interaction.followUp({
             ephemeral: false,

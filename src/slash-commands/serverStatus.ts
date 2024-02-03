@@ -11,7 +11,7 @@ export const ServerStatus: Command = {
         const logger = Logger.getLogger();
 
         logger.debug("getting server status");
-        const resp = await fetch('https://wiafplieq9.execute-api.us-east-2.amazonaws.com/status')    
+        const resp = await fetch('https://ri2pgnvtdk.execute-api.us-east-1.amazonaws.com/status')    
 
         await interaction.followUp({
             ephemeral: false,
