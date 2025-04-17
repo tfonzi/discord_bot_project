@@ -1,12 +1,12 @@
-import { GatewayIntentBits} from "discord.js";
+import { GatewayIntentBits } from "discord.js";
 import * as dotenv from "dotenv";
 
 import ready from "./listeners/ready";
 import interactionCreate from "./listeners/interactionCreate";
-import { Chatbot } from "./chat-ai/chat-bot";
-import { DiscordClient } from "./utils/discordClient";
-import { RedisEmbeddingService } from "./redis/RedisEmbeddingService";
-import { Logger, isLogLevel } from "./logger/logger";
+import { Chatbot } from "./chat-ai/chat-bot.ts";
+import { DiscordClient } from "./utils/discordClient.ts";
+import { RedisEmbeddingService } from "./redis/RedisEmbeddingService.ts";
+import { Logger, isLogLevel } from "./logger/logger.ts";
 
 dotenv.config();
 
@@ -19,7 +19,7 @@ if(process.env.LOG_LEVEL && isLogLevel(process.env.LOG_LEVEL)) {
     }
 } else {
     logger = Logger.createLogger("INFO");
-    logger.error(new Error('No log level specified in process env. Defaulting to LOG level'))
+    logger.error(new Error('No log level specified in process env. Defaulting to LOG level'));
 }
  
 try {
@@ -46,12 +46,16 @@ try {
         }
     );
 
-    // Setting up DiscordClient
     const client = DiscordClient.createClient({
-        intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent]
+        intents: [
+            GatewayIntentBits.Guilds,
+            GatewayIntentBits.GuildMessages,
+            GatewayIntentBits.GuildMembers,
+            GatewayIntentBits.MessageContent,
+            GatewayIntentBits.GuildMessageTyping,
+        ]
     });
     
-
     // Setting up Chatbot
     logger.debug(`Creating chatbot with ${process.env.OPENAI_TOKEN.substring(0,5)}...`);
     Chatbot.setKey(process.env.OPENAI_TOKEN);

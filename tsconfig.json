@@ -1,11 +1,21 @@
 {
     "compilerOptions": {
-      "module": "commonjs",
+      "skipLibCheck": true,
+      "module": "ESNext",
+      "moduleResolution": "bundler",
+      "target": "ESNext",
+      "isolatedModules": true,
       "esModuleInterop": true,
-      "target": "es6",
-      "moduleResolution": "node",
-      "sourceMap": true,
-      "outDir": "dist"
+      "noEmit": true,
+      "allowImportingTsExtensions": true,
+      "outDir": "dist",
+      "lib": ["esnext"],
+      "types": ["node"],
+      "baseUrl": "./"
     },
-    "lib": ["es2015"]
+    "exclude": ["node_modules"],
+    "include": [
+      "src/**/*.ts",
+      "bin/*.ts"
+    ]
   }

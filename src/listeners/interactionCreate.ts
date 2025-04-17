@@ -1,6 +1,6 @@
-import { Client, Interaction, CommandInteraction} from "discord.js";
+import { Client, Interaction, CommandInteraction } from "discord.js";
 
-import { Commands } from "./../slash-commands";
+import { Commands } from "./../slash-commands/index";
 import { Logger } from "../logger/logger";
 
 const handleSlashCommand = async (client: Client, interaction: CommandInteraction): Promise<void> => {
@@ -13,13 +13,13 @@ const handleSlashCommand = async (client: Client, interaction: CommandInteractio
         }
         // set ephemeral state at deferment
         if (interaction.commandName === "manage-memories") {
-            await interaction.deferReply({ephemeral: true});
+            await interaction.deferReply({ ephemeral: true });
         } else {
             await interaction.deferReply();
         }
         logger.log(`[channel-${interaction.channelId}] Received a command: ${interaction.commandName}`);
-        if (interaction.command.options){
-            logger.debug(`[channel-${interaction.channelId}] Command options were: ${JSON.stringify(interaction.options, null, 2)}`)
+        if (interaction.options.data.length > 0) {
+            logger.debug(`[channel-${interaction.channelId}] Command options were: ${JSON.stringify(interaction.options.data, null, 2)}`);
         }
         slashCommand.run(client, interaction);
     } catch(err) {
@@ -36,7 +36,7 @@ export default (client: Client): void => {
                 await handleSlashCommand(client, interaction);
             }
         } catch (err) {
-            logger.debug(`A major error occured: ${err}`);
+            logger.error(err);
         }
-    })
+    });
 }

@@ -57,7 +57,7 @@ sudo echo '{
       "files": {
         "collect_list": [
           {
-            "file_path": "/discord_bot_project/botLogs/bot.log",
+            "file_path": "/discord_bot_project/logs/bot.log",
             "log_group_name": "bot.log",
             "log_stream_name": "{instance_id}",
             "retention_in_days": 7

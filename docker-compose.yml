@@ -15,7 +15,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL}
     volumes:
       - ./bot:/bot/shared
-      - ./botLogs:/bot/logs
+      - ./logs:/bot/logs
   redis:
     image: redis/redis-stack-server:latest
     container_name: redis

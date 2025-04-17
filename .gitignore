@@ -10,3 +10,4 @@ docker-test.sh
 *.pem
 .tokens
 *.log
+.swc/*

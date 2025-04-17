@@ -1,4 +1,3 @@
-
 import { ApplicationCommandOptionType, ApplicationCommandType, Client, CommandInteraction } from "discord.js";
 
 import { Command } from "./command";

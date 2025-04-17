@@ -1,8 +1,7 @@
 import { encode } from "gpt-3-encoder"
 import { Mutex } from 'async-mutex';
 import OpenAI from 'openai';
-import { ChatCompletion } from "openai/resources";
-import { ChatCompletionCreateParamsBase, ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import type { ChatCompletion, ChatCompletionCreateParams, ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 
 import { DiscordClient } from "../utils/discordClient";
 import { RedisEmbeddingService, VectorSimilarityResult } from "../redis/RedisEmbeddingService";
@@ -103,30 +102,34 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
     private collectingTimer: NodeJS.Timeout
     private mutex: Mutex;
 
-    constructor(private history: MessageHistory, private openAi: OpenAI) {
+    constructor(private history: MessageHistory, private openai: OpenAI) {
         this.mutex = new Mutex();
         this.isCollecting = false;
     }
 
-    private async sendWithRetry(request: ChatCompletionCreateParamsBase, attempts: number = 0): Promise<ChatBotResponse> {
+    private async sendWithRetry(request: ChatCompletionCreateParams, attempts: number = 0): Promise<ChatBotResponse> {
         const logger = Logger.getLogger();
         try {
-            request.messages.push({role: "user", content: "Create a response object based on the past conversation."})
-            logger.verbose(`sent request: ${JSON.stringify(request, null, 2)}`);;
-            const response = (await this.openAi.chat.completions.create(request)) as OpenAI.Chat.Completions.ChatCompletion;
+            // Ensure messages array exists and add the user message
+            if (!request.messages) {
+                request.messages = [];
+            }
+            request.messages.push({ role: "user", content: "Create a response object based on the past conversation." });
+            logger.verbose(`sent request: ${JSON.stringify(request, null, 2)}`);
+            const response = await this.openai.chat.completions.create(request) as ChatCompletion;
             logger.verbose(`received response: ${JSON.stringify(response, null, 2)}`);
             let chatResponse: ChatBotResponse;
             if (response.choices[0].message.tool_calls) {
-                chatResponse = JSON.parse(response.choices[0].message.tool_calls[0].function.arguments)
+                chatResponse = JSON.parse(response.choices[0].message.tool_calls[0].function.arguments);
             } else if (response.choices[0].message.content) {
-                chatResponse = JSON.parse(response.choices[0].message.content)
+                chatResponse = JSON.parse(response.choices[0].message.content);
             } else {
-                throw new Error(`tool_calls and content properties are both missing`)
+                throw new Error(`tool_calls and content properties are both missing`);
             }
             if (chatResponse.shouldRespond && !chatResponse.response) {
                 throw new Error('Rivanna returned "shouldRespond" as true, but with no response');
             }
-            return chatResponse
+            return chatResponse;
         } catch (err) {
             logger.error(err as Error);
             if (attempts < 3) { // 3 attempts
@@ -300,7 +303,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         }
 
         // Send message and get response back
-        const request: ChatCompletionCreateParamsBase = {
+        const request: ChatCompletionCreateParams = {
             model: model,
             messages: fullContext,
             temperature: 1.17,
@@ -403,7 +406,7 @@ export class Chatbot implements Chatbot {
         Chatbot.EnsureExistance();
         Chatbot.instance.openai = new OpenAI({
             apiKey: key
-        }); 
+        });
     }
 
     public static setContext(contextString: string) {
@@ -504,15 +507,14 @@ export class Chatbot implements Chatbot {
                 logger.debug("Embedding was cached!")
                 return this.embeddingsCache.get(text);
             }
-            // cache embedding result so we don't have to do unneccesary API calls
-            const embedding = (await this.openai.embeddings.create({
+            const response = await this.openai.embeddings.create({
                 model: "text-embedding-ada-002",
-                input: text
-            })).data[0].embedding;
-
-            this.embeddingsCache.set(text, embedding)
-            return embedding
-        } catch(err) {
+                input: text,
+            });
+            const embedding = response.data[0].embedding;
+            this.embeddingsCache.set(text, embedding);
+            return embedding;
+        } catch (err) {
             logger.error(err);
             if (attempts < 3) {
                 await delay(100);

@@ -1,6 +1,6 @@
 import { Client } from "discord.js";
 
-import { Commands } from "./../slash-commands";
+import { Commands } from "./../slash-commands/index";
 import { Chatbot } from "../chat-ai/chat-bot";
 import { Logger } from "../logger/logger";
 
