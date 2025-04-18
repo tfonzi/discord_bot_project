@@ -1,7 +1,15 @@
 import { encode } from "gpt-3-encoder"
 import { Mutex } from 'async-mutex';
 import OpenAI from 'openai';
-import type { ChatCompletion, ChatCompletionCreateParams, ChatCompletionMessageParam } from 'openai/resources/chat/completions';
+import type { 
+    ChatCompletion, 
+    ChatCompletionCreateParams, 
+    ChatCompletionMessageParam, 
+    ChatCompletionContentPart
+} from 'openai/resources/chat/completions';
+import { OpenAI as OpenAIClient } from "openai";
+import { AttachmentBuilder, TextChannel } from 'discord.js';
+import { Buffer } from 'node:buffer';
 
 import { DiscordClient } from "../utils/discordClient";
 import { RedisEmbeddingService, VectorSimilarityResult } from "../redis/RedisEmbeddingService";
@@ -15,7 +23,8 @@ const HISTORY_CONTEXT_RECALL_LENGTH = 10; // number of past history messages to 
 
 type ChatBotResponse = {
     shouldRespond: boolean,
-    response: string
+    response: string,
+    shouldGenerateImage: boolean
 }
 
 function generateChatCompletionContext(originalContext: ChatCompletionMessageParam, chatHistory: ChatCompletionMessageParam[], extraContext: ChatCompletionMessageParam): number {
@@ -53,17 +62,48 @@ interface MessageHistory {
     purgeOldestEntries(x: number)
 }
 
+// Define a type for storing message content (text + optional image URLs)
+type MessageContent = {
+    text: string;
+    imageUrls?: string[];
+}
+
 class MessageHistory implements MessageHistory { // MessageHistory class -- modified queue for storing message history for Chatbot
     private storage: ChatCompletionMessageParam[] = [];
 
     constructor(private context: ChatCompletionMessageParam, private capacity: number = 100) {}
 
-    addMessage(msg: ChatCompletionMessageParam): void {
+    addMessage(msg: ChatCompletionMessageParam): void { 
+        let textContentToAdd: string | null = null;
+        let roleToAdd = msg.role;
 
-        if(this.storage.length == this.capacity) {
-            this.storage.splice(0,1); //oldest message gets removed from history
+        if (typeof msg.content === 'string') {
+            textContentToAdd = msg.content;
+        } else if (Array.isArray(msg.content)) {
+            // Iterate through parts to find the text content
+            for (const part of msg.content) {
+                if (part.type === 'text') {
+                    textContentToAdd = part.text;
+                    break; // Assume only one text part
+                }
+            }
+        } else {
+             // Handle null or other unexpected content types if necessary
+             textContentToAdd = null;
         }
-        this.storage.push(msg);
+        
+        // Only add if we found text content and role is storable
+        if (textContentToAdd !== null && (roleToAdd === 'user' || roleToAdd === 'assistant' || roleToAdd === 'system')) {
+             // Store only role and text content
+             const messageToStore: ChatCompletionMessageParam = {
+                role: roleToAdd,
+                content: textContentToAdd
+            };
+            if(this.storage.length == this.capacity) {
+                this.storage.splice(0,1);
+            }
+            this.storage.push(messageToStore);
+        }
     }
 
     getOriginalContext(): ChatCompletionMessageParam {
@@ -92,12 +132,12 @@ class MessageHistory implements MessageHistory { // MessageHistory class -- modi
 }
 
 interface MessageProcessor {
-    processMessage(msg: string, channelId: string): Promise<void>
+    processMessage(msg: string, channelId: string, imageUrls?: string[]): Promise<void>
 }
 
 class MessageProcessor implements MessageProcessor { // MessageProcessor class -- Processes messages for chatbot
-    private requestBasket: string[] = []; //basket for storing requests
-    private responseBasket: string[] = []; //basket for generating response
+    private requestBasket: MessageContent[] = []; 
+    private responseBasket: MessageContent[] = []; 
     private isCollecting: boolean;
     private collectingTimer: NodeJS.Timeout
     private mutex: Mutex;
@@ -141,22 +181,54 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         }
     }
 
-    async processMessage(msg: string, channelId: string): Promise<void> {
+    private async sendInCharacterError(channelId: string, errorDescription: string): Promise<void> {
         const logger = Logger.getLogger();
-        this.requestBasket.push(msg);
+        try {
+            const openai = new OpenAIClient({ apiKey: process.env.OPENAI_TOKEN });
+            const errorResponseGen = await openai.chat.completions.create({
+                model: "gpt-4o",
+                messages: [
+                    { role: "system", content: "Explain in character that you encountered a difficulty related to image generation. Keep it brief and apologize." },
+                    { role: "user", content: `Problem: ${errorDescription}` }
+                ],
+                max_tokens: 100,
+                temperature: 0.7
+            });
+
+            const inCharacterMessage = errorResponseGen.choices[0]?.message?.content?.trim();
+
+            if (inCharacterMessage) {
+                await DiscordClient.postMessage(inCharacterMessage, channelId);
+                logger.log(`[channel-${channelId}] [Bot] Sent in-character error message: ${inCharacterMessage}`);
+            } else {
+                // Fallback to generic message if AI generation fails
+                logger.error(new Error(`[channel-${channelId}] [Bot] Failed to generate in-character error message. Sending generic one.`));
+                await DiscordClient.postMessage("Whoopsies!", channelId);
+            }
+        } catch (genError) {
+            logger.error(new Error(`[channel-${channelId}] [Bot] Error generating in-character error message: ${genError instanceof Error ? genError.message : String(genError)}`));
+            // Fallback to generic message on error
+            await DiscordClient.postMessage("Sorry, I encountered an error with the image.", channelId);
+        }
+    }
+
+    async processMessage(msg: string, channelId: string, imageUrls?: string[]): Promise<void> {
+        const logger = Logger.getLogger();
+        // Add MessageContent object to basket
+        this.requestBasket.push({ text: msg, imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined }); 
         let release = await this.mutex.acquire();
         try {
-            //process in order
-            this.requestBasket.forEach(msg => {
-                logger.log(`[channel-${channelId}] [User] "${msg}"`)
-                this.responseBasket.push(msg);
+            // Process requests, adding them to the response basket
+            this.requestBasket.forEach(content => {
+                logger.log(`[channel-${channelId}] [User] "${content.text}" ${content.imageUrls?.length ? `with ${content.imageUrls.length} image(s)` : ''}`);
+                this.responseBasket.push(content); 
             });
             this.requestBasket = [];
         } finally {
             release();
         }
-        let result = undefined;
-        if (!this.isCollecting) { // if we are not collecting responses when we process a message, then it is the first message. Start collecting for any more messages that appear in timer span
+        
+        if (!this.isCollecting) { 
             this.isCollecting = true;
             logger.debug(`[channel-${channelId}] Collecting chat entries. Bucketed first chat entry. Started timer!`)
             await new Promise(resolve => {
@@ -170,17 +242,90 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
                     const guildId = DiscordClient.getGuildId(channelId);
                     await RedisEmbeddingService.CreateIndexForEmbedding(guildId); // no-op if index has already been created
 
-                    // add current message to history
-                    this.responseBasket.forEach(async (message) => {
-                        this.history.addMessage({content: message, role: "user"});
+                    // Combine *all* text and *all* image URLs from the bucket
+                    let combinedText = "";
+                    const allImageUrls: string[] = [];
+                    
+                    this.responseBasket.forEach(content => {
+                        combinedText += content.text + "\n"; // Combine text messages
+                        if (content.imageUrls) {
+                            allImageUrls.push(...content.imageUrls); // Collect all image URLs
+                        }
+                        // Add only the text part of this specific user message to history
+                        this.history.addMessage({content: content.text, role: "user"}); 
                     });
-                    this.responseBasket = []; // refresh responseBasket
+                    combinedText = combinedText.trim(); // Remove trailing newline
+                    this.responseBasket = []; // Clear basket
+
+                    // Generate context based on text history (ignores images)
                     const extraContext = await this.generateExtraContext(guildId, this.history);
                     DiscordClient.sendTyping(channelId);
-                    const chatResponse = await this.sendMessageToAPI("gpt-4-1106-preview", this.history, extraContext)
+                    
+                    // Pass combined text and all collected image URLs to the API call
+                    const chatResponse = await this.sendMessageToAPI("gpt-4o", this.history, extraContext, combinedText, allImageUrls);
+                    
+                    // --- Image Generation Block (remains the same) ---
+                    if (chatResponse.shouldGenerateImage) {
+                        // Step 1: Use GPT-4o to generate a concise image prompt
+                        const openai = new OpenAIClient({ apiKey: process.env.OPENAI_TOKEN });
+                        const promptGen = await openai.chat.completions.create({
+                            model: "gpt-4o",
+                            messages: [
+                                { role: "system", content: "You are an expert at writing concise, vivid prompts for AI image generation. Given a user request and context, write a single-sentence prompt for an image generation model. Do not include any commentary, just the prompt. The context consists of previous messages + background information. Please do not hallucinate any of this into the image. The image provided should just be what was immediately requested, located at the end of the context." },
+                                { role: "user", content: `Artist response right before the image is delievered: ${chatResponse.response}\nContext: ${extraContext}` }
+                            ],
+                            max_tokens: 400,
+                            temperature: 0.7
+                        });
+                        const imagePrompt = promptGen.choices[0].message.content.trim();
+                        logger.log(`[channel-${channelId}] [Bot] Generating image for prompt: ${imagePrompt}`);
+
+                        // Step 2: Generate image using OpenAI image API requesting base64 data
+                        const imageResponse = await openai.images.generate({
+                            prompt: imagePrompt,
+                            model: "dall-e-3",
+                            style: "natural",
+                            n: 1,
+                            size: "1024x1024",
+                            response_format: "b64_json" // Request base64 format
+                        });
+
+                        // Step 3: Decode base64 and send as attachment
+                        const base64Data = imageResponse.data[0].b64_json;
+                        if (base64Data) {
+                            const imageBuffer = Buffer.from(base64Data, 'base64');
+                            const attachment = new AttachmentBuilder(imageBuffer, { name: 'ai-generated-image.png' });
+                            try {
+                                // Get channel and send directly
+                                const channel = await DiscordClient.getClient().channels.fetch(channelId);
+                                // Type guard to ensure channel is TextChannel
+                                if (channel instanceof TextChannel) {
+                                    await channel.send({ files: [attachment] });
+                                    logger.log(`[channel-${channelId}] [Bot] Posted generated image.`);
+                                } else {
+                                    // Log error if channel is not a TextChannel or null/undefined
+                                    logger.error(new Error(`[channel-${channelId}] [Bot] Could not find a valid TextChannel to post image.`));
+                                    await DiscordClient.postMessage("Sorry, I couldn't find the right channel to send the image.", channelId);
+                                }
+                            } catch (err) {
+                                // Log error if sending fails
+                                logger.error(new Error(`[channel-${channelId}] [Bot] Failed to send image attachment: ${err instanceof Error ? err.message : String(err)}`));
+                                // Send in-character error message instead of generic one
+                                await this.sendInCharacterError(channelId, "Failed to send the image file.");
+                            }
+                        } else {
+                            // Log error if base64 data is missing
+                            logger.error(new Error(`[channel-${channelId}] [Bot] Failed to retrieve base64 data for the image.`));
+                            // Send in-character error message instead of generic one
+                            await this.sendInCharacterError(channelId, "Could not generate the image data.");
+                        }
+                    } 
                     if(chatResponse.shouldRespond) {
-                        await DiscordClient.postMessage(chatResponse.response.replace("Rivanna:", ""), channelId);
-                        logger.log(`[channel-${channelId}] [Bot] "${chatResponse}"`)
+                        const responseText = chatResponse.response.replace("Rivanna:", "");
+                        await DiscordClient.postMessage(responseText, channelId);
+                        // Add assistant's text response to history
+                        this.history.addMessage({role: 'assistant', content: responseText}); 
+                        logger.log(`[channel-${channelId}] [Bot] "${responseText}"`); 
                     }
                 }
             } finally {
@@ -198,19 +343,9 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
     async generateExtraContext(guildId: string, history: MessageHistory): Promise<string> {
         const logger = Logger.getLogger();
         const contextMessages: string[] = [];
-        const historyMessageStrings = history.getHistory().map(msg => {
-            if (Array.isArray(msg.content)) {
-                let contentString = "";
-                msg.content.forEach(part => {
-                    if (part.type === "text") {
-                        contentString = contentString.concat(part.text)
-                    }
-                    return contentString;
-                });
-            } else {
-                return msg.content as string;
-            }
-        });
+        // History only contains text messages due to logic in addMessage
+        const historyMessageStrings = history.getHistory().map(msg => msg.content as string); 
+        
         if (historyMessageStrings.length > HISTORY_CONTEXT_RECALL_LENGTH) {
             contextMessages.push(...(historyMessageStrings.slice(historyMessageStrings.length - HISTORY_CONTEXT_RECALL_LENGTH)))
         } else {
@@ -245,8 +380,7 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
 
         // make copy of history, we will send a message to the API, see the response, and generate content based on that too.
         const historyCopy = history.makeCopy()
-
-        let chatResponse = await this.sendMessageToAPI("gpt-3.5-turbo-1106", historyCopy, extraContentString);
+        let chatResponse = await this.sendMessageToAPI("gpt-4o", historyCopy, extraContentString, "", []);
         if (chatResponse.response) {
             logger.debug(`Generating additional context from what we think Rivanna will say: ${chatResponse.response}`);
             (await RedisEmbeddingService.PerformVectorSimilarity(guildId, (await Chatbot.getInstance().createEmbedding(chatResponse.response)))).forEach(result => {
@@ -274,77 +408,103 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
         return extraContentString;
     }
 
-    async sendMessageToAPI(model: string, history: MessageHistory, extraContext: string): Promise<ChatBotResponse> {
+    async sendMessageToAPI(model: string, history: MessageHistory, extraContext: string, combinedText: string, collectedImageUrls?: string[]): Promise<ChatBotResponse> {
         const logger = Logger.getLogger();
         const extraContextRequest: ChatCompletionMessageParam = { 
             role: 'user',
-            content: `"Here is some additional context that may help you with your acting: ${extraContext} You will not reference this message directly but use it for context when applicable in future conversation."`
+            content: `"Here is some additional context that may help you with your acting: ${extraContext} You will not reference this message directly but use it for context when applicable in future conversation. Respond in JSON format. Your response must be a valid JSON object."`
         };
         
         this.purgeHistoryIfNeeded(history, extraContextRequest);
 
-        // Reorganize conversation order based on clarity length
+        // Construct the user message content (potentially multimodal)
+        let userMessageContentParts: ChatCompletionContentPart[] = [
+            { type: "text", text: combinedText } // Start with the combined text
+        ];
+
+        // Add all collected image URLs
+        if (collectedImageUrls && collectedImageUrls.length > 0) {
+            collectedImageUrls.forEach(url => {
+                userMessageContentParts.push({ type: "image_url", image_url: { url: url } });
+            });
+        }
+        
+        // The user message to be added to the full context
+        const userMessage: ChatCompletionMessageParam = {
+            role: "user",
+            // Use the array format if images are present, otherwise potentially just string?
+            // Let's always use the array format for consistency when calling the vision model.
+            content: userMessageContentParts 
+        };
+
+        // Reorganize conversation order
         let fullContext: ChatCompletionMessageParam[] = [];
-        const messageClarityLength = 3; //determines how context gets sandwiched in, the 'x' most recent messages will be at front of conversation
-        if (history.getHistory().length > messageClarityLength) {
-            // sandwich original context and extra inside if history is longer
+        const messageClarityLength = 3; 
+        const historyMessages = history.getHistory(); // Text-only history
+
+        if (historyMessages.length > messageClarityLength) {
             fullContext = [
-                history.getOriginalContext(), //original context
-                ...history.getHistory().slice(0, history.getHistory().length - messageClarityLength), // the oldest part of the conversation
-                extraContextRequest, // extra context if needed
-                ...history.getHistory().slice(history.getHistory().length - messageClarityLength), // the most recent part of the conversation
+                history.getOriginalContext(), 
+                ...historyMessages.slice(0, historyMessages.length - messageClarityLength), 
+                extraContextRequest, 
+                ...historyMessages.slice(historyMessages.length - messageClarityLength),
+                userMessage // Add the current potentially multimodal user message at the end
             ];
         } else {
             fullContext = [
-                history.getOriginalContext(), //original context
-                extraContextRequest, // extra context if needed
-                ...history.getHistory() // history
+                history.getOriginalContext(), 
+                extraContextRequest, 
+                ...historyMessages,
+                userMessage // Add the current potentially multimodal user message at the end
             ];
         }
 
-        // Send message and get response back
         const request: ChatCompletionCreateParams = {
-            model: model,
+            model: model, // Ensure this is a vision-capable model like gpt-4o
             messages: fullContext,
             temperature: 1.17,
-            max_tokens: RESPONSE_TOKEN_LENGTH,
+            max_tokens: RESPONSE_TOKEN_LENGTH, 
             presence_penalty: 0.08,
             frequency_penalty: -0.08,
             response_format: { type: "json_object"},
             tool_choice: {type: "function", function: {name: "CreateResponseObject"}},
-            tools: [
+            tools: [ 
                 {
                     type: "function",
                     function: {
                         "name": "CreateResponseObject",
-                        "description": "Creates a response object based on past conversation",
+                        "description": "Creates a response object based on past conversation. If the user is asking for an image, set shouldGenerateImage to true and make the response the image prompt.",
                         "parameters": {
                             "type": "object",
                             "properties": {
-                            "shouldRespond": {
-                                "type": "boolean",
-                                "description": "Based on the conversation, whether Rivanna should respond at all."
+                                "shouldRespond": {
+                                    "type": "boolean",
+                                    "description": "Based on the conversation, whether Rivanna should respond at all."
+                                },
+                                "response": {
+                                    "type": "string",
+                                    "description": "If Rivanna chose to respond, this is her response or the image prompt."
+                                },
+                                "shouldGenerateImage": {
+                                    "type": "boolean",
+                                    "description": "Whether the user is asking for an image to be generated."
+                                }
                             },
-                            "response": {
-                                "type": "string",
-                                "description": "If Rivanna chose to respond, this is her response."
-                            }
-                            },
-                            "required": ["shouldRespond"]
+                            "required": ["shouldRespond", "shouldGenerateImage"]
                         }
                     }
                 }
-              ]
-        }
-        const response = (await this.sendWithRetry(request))        
+            ]
+        };
+        
+        const response = await this.sendWithRetry(request);       
         logger.debug(`Got a chat response of: ${JSON.stringify(response)}`)
-        if (response.shouldRespond) {
-            history.addMessage({role: 'assistant', content: response.response});
-        }
+        
         return response;
     }
 
     async purgeHistoryIfNeeded(history: MessageHistory, extraContext: ChatCompletionMessageParam) {
+        // Note: This calculation remains text-based.
         const logger = Logger.getLogger();
         let fullContextTokenLength = generateChatCompletionContext(history.getOriginalContext(), [...history.getHistory()], extraContext);
         if ((fullContextTokenLength + 100 + RESPONSE_TOKEN_LENGTH > CONTEXT_MAX_LENGTH)) { // if chat tokens is greater than CONTEXT_MAX_LENGTH, we need to purge some of our chat history.
@@ -359,16 +519,17 @@ class MessageProcessor implements MessageProcessor { // MessageProcessor class -
 }
 
 export interface Chatbot {
-    sendMessage(guildId: string, thread: string, msg: string): Promise<void>,
-    username: string,
-    setChatActiveState(guildId: string, channelId: string, state: boolean): void,
-    getChatActiveState(guildId: string, channelId: string): boolean,
-    isActive(): boolean,
-    setChatTimer(guildId: string, channelId: string, timer: NodeJS.Timeout): void,
-    refreshChatTimer(guildId: string, channelId: string): void,
-    clearChatTimer(guildId: string, channelId: string): void,
-    getHistory(guildId: string, channelId: string): MessageHistory,
-    resetHistory(guildId: string, channelId: string): void,
+    // Update signature
+    sendMessage(guildId: string, channelId: string, msg: string, imageUrls?: string[]): Promise<void>; 
+    username: string;
+    setChatActiveState(guildId: string, channelId: string, state: boolean): void;
+    getChatActiveState(guildId: string, channelId: string): boolean;
+    isActive(): boolean;
+    setChatTimer(guildId: string, channelId: string, timer: NodeJS.Timeout): void;
+    refreshChatTimer(guildId: string, channelId: string): void;
+    clearChatTimer(guildId: string, channelId: string): void;
+    getHistory(guildId: string, channelId: string): MessageHistory;
+    resetHistory(guildId: string, channelId: string): void;
     createEmbedding(text: string): Promise<number[]>
 }
 
@@ -476,7 +637,8 @@ export class Chatbot implements Chatbot {
         this.activeChatTimers.delete(`${guildId}-${channelId}`);
     }
 
-    async sendMessage(guildId: string, channelId: string, msg: string): Promise<void> {
+    // Update signature
+    async sendMessage(guildId: string, channelId: string, msg: string, imageUrls?: string[]): Promise<void> { 
         const logger = Logger.getLogger();
         try {
             if (!this.context || !this.openai) {
@@ -485,18 +647,21 @@ export class Chatbot implements Chatbot {
             if (!this.activeChats.includes(`${guildId}-${channelId}`)) {
                 throw new Error("Cannot send message. Chat in this id is not active.");
             }
-            if (!this.messageHistories.has(`${guildId}-${channelId}`)){ // populate new MessageHistory for channel if it does not exist
+            if (!this.messageHistories.has(`${guildId}-${channelId}`)){ 
                 this.messageHistories.set(`${guildId}-${channelId}`, new MessageHistory(this.context))
             }
-            if (!this.processers.has(`${guildId}-${channelId}`)){ // populate new MessageProcessor for channel if it does not exist
+            if (!this.processers.has(`${guildId}-${channelId}`)){ 
                 this.processers.set(`${guildId}-${channelId}`, new MessageProcessor(this.messageHistories.get(`${guildId}-${channelId}`), this.openai));
             }
-            await this.processers.get(`${guildId}-${channelId}`).processMessage(msg, channelId);
-            await this.refreshChatTimer(guildId, channelId);
+            // Pass imageUrls to processMessage
+            await this.processers.get(`${guildId}-${channelId}`).processMessage(msg, channelId, imageUrls); 
+            // Refresh the timer on message send
+             await this.refreshChatTimer(guildId, channelId); 
         }
         catch(err) {
             logger.error(err);
-            DiscordClient.postMessage("...", channelId);
+            // Keep simple fallback error message here
+            DiscordClient.postMessage("Sorry, something went wrong.", channelId); 
         }
     }
 

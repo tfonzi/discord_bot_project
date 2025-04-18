@@ -9,12 +9,19 @@ const CHAT_TIMER = 900000; //end chat after 15 minutes, aka 900000
 
 async function chatListener(msg: Message<boolean>) { 
     if(msg.author.username != Chatbot.getInstance().userName && Chatbot.getInstance().getChatActiveState(msg.guildId, msg.channelId)) {
-        if (msg.content.at(0) == "/") {
-            return; //ignore if it starts with a slash
+        if (msg.content.startsWith("/")) {
+            return;
         }
         const logger = Logger.getLogger();
-        logger.debug(`Chat in ${msg.guildId}-${msg.channelId} is active. Sending message.`)
-        await Chatbot.getInstance().sendMessage(msg.guildId, msg.channelId, `${msg.author.username}: ${msg.content}`);
+        logger.debug(`Chat in ${msg.guildId}-${msg.channelId} is active. Processing message.`);
+
+        const imageUrls = msg.attachments
+            .filter(att => att.contentType?.startsWith('image/'))
+            .map(att => att.url);
+        
+        const messageContent = `${msg.author.username}: ${msg.content}`;
+
+        await Chatbot.getInstance().sendMessage(msg.guildId, msg.channelId, messageContent, imageUrls);
     }
 };
 
