@@ -1,7 +1,8 @@
 import { ApplicationCommandOptionType, ApplicationCommandType, Client, CommandInteraction } from "discord.js";
 
 import { Command } from "./command";
-import { Logger } from "../logger/logger";
+// V2 Imports
+import { LoggerV2 } from "../logger/loggerV2";
 
 export const Roll: Command = {
     name: "roll",
@@ -60,42 +61,48 @@ export const Roll: Command = {
         type: ApplicationCommandOptionType.Integer
     }],
     run: async (_client: Client, interaction: CommandInteraction) => {
-        const logger = Logger.getLogger();
-        let diceCommand = "";
-        if (interaction.options.get("d20")) {
-            diceCommand += ` ${interaction.options.get("d20").value}d20`
-        }
-        if (interaction.options.get("d12")) {
-            diceCommand += ` ${interaction.options.get("d12").value}d12`
-        }
-        if (interaction.options.get("d10")) {
-            diceCommand += ` ${interaction.options.get("d10").value}d10`
-        }
-        if (interaction.options.get("d8")) {
-            diceCommand += ` ${interaction.options.get("d8").value}d8`
-        }
-        if (interaction.options.get("d6")) {
-            diceCommand += ` ${interaction.options.get("d6").value}d6`
-        }
-        if (interaction.options.get("manual_input")) {
-            diceCommand += ` ${interaction.options.get("manual_input").value}`
-        }
-        diceCommand = diceCommand.substring(1); //removing leading whitespace
+        // Create child logger for this specific interaction
+        const logger = LoggerV2.getLogger().child({
+            component: 'SlashCommand:Roll',
+            interactionId: interaction.id,
+            channelId: interaction.channelId,
+            guildId: interaction.guildId,
+            user: interaction.user.tag
+        });
+        logger.debug('Roll command invoked');
 
-        let shift: number| undefined;
-        if (interaction.options.get("add_to_roll")) {
-           shift = (interaction.options.get("add_to_roll").value as number);
+        let diceCommand = "";
+        const options = interaction.options;
+
+        // Build dice string from options
+        if (options.get("d20")) diceCommand += ` ${options.get("d20")!.value}d20`;
+        if (options.get("d12")) diceCommand += ` ${options.get("d12")!.value}d12`;
+        if (options.get("d10")) diceCommand += ` ${options.get("d10")!.value}d10`;
+        if (options.get("d8")) diceCommand += ` ${options.get("d8")!.value}d8`;
+        if (options.get("d6")) diceCommand += ` ${options.get("d6")!.value}d6`;
+        if (options.get("manual_input")) diceCommand += ` ${options.get("manual_input")!.value}`; // Add manual input
+
+        diceCommand = diceCommand.trim(); // Trim leading/trailing whitespace
+
+        if (!diceCommand) {
+            logger.warn('Roll command used with no dice specified.');
+            await interaction.editReply({ content: "Please specify which dice to roll! Use the options or `manual_input`." });
+            return;
         }
+
+        let shift: number | undefined;
+        if (options.get("add_to_roll")) {
+           shift = options.get("add_to_roll")!.value as number;
+        }
+        logger.debug({ diceCommand, shift }, 'Processing dice command');
 
         const commandResponse = processDiceCommand(diceCommand, shift);
-        logger.log(`[channel-${interaction.channelId}] Answered command with: ${commandResponse}`);
-        await interaction.followUp({
-            ephemeral: true,
-            content: commandResponse
-        });
+        logger.info({ response: commandResponse }, 'Sending dice roll result');
+        
+        // Use editReply since we deferred in interactionCreate
+        await interaction.editReply({ content: commandResponse });
     }
-
-}
+};
 
 function isCountingNumber(x: string) {
     const num = parseInt(x);
