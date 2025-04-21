@@ -56,7 +56,7 @@ let logger: PinoLogger | undefined = undefined;
         logger.info("Discord client created.");
 
         logger.info("Initializing ChatbotV2...");
-        const botUsername = "AssistantBot";
+        const botUsername = "Rivanna";
         ChatbotV2.initialize(
             process.env.OPENAI_TOKEN,
             process.env.CONTEXT || "You are a helpful AI assistant.",

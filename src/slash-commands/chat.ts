@@ -11,10 +11,6 @@ const CHAT_TIMER = 900000; // 15 minutes
 // The message listener function
 async function chatListenerV2(msg: Message<boolean>) {
     const logger = LoggerV2.getLogger().child({ channelId: msg.channelId, guildId: msg.guildId });
-    // Check if the message is from the bot itself (using initialized username)
-    // TODO: Consider checking against client.user.id for more robustness
-    // const botUser = DiscordClientV2.getClient()?.user;
-    // if (botUser && msg.author.id === botUser.id) return;
     
     // Check if chat is active for this channel and message is not from bot/command
     if (!msg.author.bot && ChatbotV2.getChatActiveState(msg.channelId) && !msg.content.startsWith("/")) {
@@ -25,7 +21,7 @@ async function chatListenerV2(msg: Message<boolean>) {
             .map(att => att.url);
         
         // Pass necessary info to the ChatbotV2 handler
-        await ChatbotV2.handleIncomingDiscordMessage(msg.channelId, msg.author.id, msg.content, imageUrls);
+        await ChatbotV2.handleIncomingDiscordMessage(msg.channelId, msg.id, msg.author.username, msg.content, imageUrls);
     } else {
         // Optional: Log ignored messages
         // logger.trace({ author: msg.author.tag, isBot: msg.author.bot, isActive: ChatbotV2.getChatActiveState(msg.channelId), startsWithSlash: msg.content.startsWith("/") }, "Ignoring message.");
@@ -68,16 +64,6 @@ async function endChatV2(client: Client, interaction: CommandInteraction) {
         logger.debug('Clearing chat timer and setting state to inactive.');
         ChatbotV2.clearChatTimer(interaction.channelId)
         ChatbotV2.setChatActiveState(interaction.channelId, false);
-        
-        // Check if any chats remain active globally
-        // TODO: ChatbotV2 needs an isActive() method or similar global check
-        // const anyActive = ChatbotV2.isAnyChatActive(); // Hypothetical method
-        // For now, assume we might need to turn off the listener if no other active chats
-        // This logic remains fragile without a proper global check
-        // if (!anyActive) {
-        //     logger.info("No more active chats detected globally. Attempting to remove messageCreate listener.");
-        //     client.off(`messageCreate`, chatListenerV2);
-        // } 
     }
 }
 
@@ -116,8 +102,7 @@ export const ChatStart: Command = {
         await interaction.editReply({ content: `*Rivanna enters chat*` });
         
         // Send initial greeting via Chatbot
-        // TODO: Pass user ID who initiated?
-        await ChatbotV2.handleIncomingDiscordMessage(interaction.channelId, client.user.id, "<@{interaction.user.id}> started the chat! Rivanna walks in and greets the room:");
+        await ChatbotV2.handleIncomingDiscordMessage(interaction.channelId, "", interaction.user.username, `${interaction.user.username} started the chat! Rivanna walks in and greets the room:`);
     }
 }
 

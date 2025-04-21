@@ -13,35 +13,39 @@ import { RedisEmbeddingServiceV2, VectorSimilarityResult } from "../redis/RedisE
 import { LoggerV2 } from "../logger/loggerV2";
 import { Logger as PinoLogger } from 'pino';
 import { delay } from "../utils/utils";
-import { encode } from "gpt-3-encoder"; // Keep for potential token counting later
 
 // --- Constants --- (Can be moved or made configurable)
 const COLLECT_TIMER = 5000; // 5 seconds
 const HISTORY_CHAR_LIMIT = 10000; // Max characters for history context
-const CHAT_COMPLETION_MODEL = "gpt-4o"; // Or make configurable
+const DECISION_MODEL = "o4-mini"; // Model for decision logic
+const GENERATION_MODEL = "gpt-4o"; // More powerful model for text/prompt generation
 const EMBEDDING_MODEL = "text-embedding-3-small"; // Or make configurable
 const IMAGE_GENERATION_MODEL = "dall-e-3"; // Or make configurable
 
 // --- Interfaces & Types ---
 
-type ChatBotResponseV2 = {
+
+// Type for the decision logic response
+type DecisionResponse = {
     shouldRespond: boolean;
-    response: string;
     shouldGenerateImage: boolean;
+    emojiReactions: Array<{ messageId: string; emoji: string }>;
 };
 
-// Content of a single message, potentially batched
-type MessageContent = {
-    text: string;
+// Structure for individual messages passed to the batch handler
+type ProcessedMessage = {
+    messageId: string; // Discord message ID
+    user: string;    // Discord username
+    text?: string;
     imageUrls?: string[];
 };
 
-// Define the schema for the OpenAI tool call
-const RESPONSE_TOOL_SCHEMA: OpenAI.ChatCompletionTool = {
+// NEW: Define the schema for the decision-making tool call
+const DECISION_TOOL_SCHEMA: OpenAI.ChatCompletionTool = {
     type: "function",
     function: {
-        name: "generate_response_and_image_decision",
-        description: "Generates the chatbot response text and decides if an image should be generated based on the conversation.",
+        name: "make_response_decision",
+        description: "Based on the conversation history, decide whether to respond with text, generate an image, and which messages (if any) to react to.",
         parameters: {
             type: "object",
             properties: {
@@ -49,16 +53,30 @@ const RESPONSE_TOOL_SCHEMA: OpenAI.ChatCompletionTool = {
                     type: "boolean",
                     description: "Whether the chatbot should send a text response message."
                 },
-                response: {
-                    type: "string",
-                    description: "The text content of the chatbot's response. Empty if shouldRespond is false."
-                },
                 shouldGenerateImage: {
                     type: "boolean",
-                    description: "Whether the chatbot should generate an image based on the response or conversation context."
+                    description: "Whether the chatbot should generate an image based on the conversation context."
+                },
+                emojiReactions: {
+                    type: "array",
+                    description: "An array of objects, each containing a 'messageId' and 'emoji'. Use an empty array [] if no reactions are desired. Example: [ {\"messageId\": \"123...\", \"emoji\": \"👍\"} ]",
+                    items: {
+                        type: "object",
+                        properties: {
+                            messageId: {
+                                type: "string",
+                                description: "The message ID to react to."
+                            },
+                            emoji: {
+                                type: "string",
+                                description: "The emoji (Unicode) to react with."
+                            }
+                        },
+                        required: ["messageId", "emoji"] // Correct casing
+                    }
                 }
             },
-            required: ["shouldRespond", "response", "shouldGenerateImage"]
+            required: ["shouldRespond", "shouldGenerateImage", "emojiReactions"]
         }
     }
 };
@@ -75,28 +93,73 @@ class MessageHistoryV2 {
 
     constructor(systemPromptText: string, private channelId: string, private capacity: number = 100) {
         this.systemPrompt = { role: "system", content: systemPromptText };
-        // Create a child logger specific to this history instance
         this.logger = LoggerV2.getLogger().child({ component: 'MessageHistory', channelId: this.channelId });
-        this.logger.info('MessageHistoryV2 created');
+        this.logger.debug('MessageHistoryV2 created');
     }
 
     /**
-     * Adds a message (user or assistant) to the history.
+     * Transforms a ProcessedMessage into a complete ChatCompletionMessageParam object suitable for history.
+     * Returns null if the message should not be added (e.g., assistant message with no text content).
+     */
+    private _transformProcessedMessageToUserContent(processedMessage: ProcessedMessage): OpenAI.ChatCompletionMessageParam | null {
+        const contentParts: OpenAI.ChatCompletionContentPart[] = [];
+        const botUsername = ChatbotV2.getUsername();
+        const role = processedMessage.user === botUsername ? 'assistant' : 'user'; // Determine role first
+
+        // --- Build Content Parts --- 
+        if (processedMessage.text) {
+            // Always add text part if present
+            let textContent = "";
+            if (role === 'user') {
+                textContent = `${processedMessage.user}: ${processedMessage.text}`;
+            } else { // role === 'assistant'
+                textContent = processedMessage.text; // Assistant messages don't need the user prefix
+            }
+            contentParts.push({ type: "text", text: textContent });
+        }
+
+        if (processedMessage.imageUrls) {
+            processedMessage.imageUrls.forEach(url => {
+                if (url && typeof url === 'string' && url.startsWith('http')) {
+                     // ONLY add the image_url part if the role is USER
+                     if (role === 'user') { 
+                        contentParts.push({ type: "image_url", image_url: { url: url, detail: "auto" } });
+                     }
+                } else {
+                    this.logger.warn({ url, messageId: processedMessage.messageId }, 'Skipping invalid image URL during history transformation');
+                }
+            });
+        }
+
+        if (contentParts.length === 0) {
+             // Handle cases where maybe only an invalid image URL was provided, or no text/images at all.
+             this.logger.warn({ processedMessage }, 'ProcessedMessage resulted in no valid content parts after filtering.');
+             return null;
+        }
+
+        // --- Construct Final Message Object (Role determined above) ---
+        // Use type assertion as the role is still dynamic in this path
+        return { role, content: contentParts } as ChatCompletionMessageParam;
+    }
+
+    /**
+     * Adds a user or assistant message from a ProcessedMessage object to the history.
      * Ensures history does not exceed capacity.
      */
-    addMessage(role: 'user' | 'assistant', content: string): void {
-        if (role !== 'user' && role !== 'assistant') {
-            this.logger.warn({ role }, 'Attempted to add message with invalid role to history');
-            return;
-        }
-        const message: ChatCompletionMessageParam = { role, content };
+    addMessage(processedMessage: ProcessedMessage): void {
+        const messageToAdd = this._transformProcessedMessageToUserContent(processedMessage);
 
-        if (this.history.length >= this.capacity) {
-            const removed = this.history.splice(0, 1); // Remove the oldest message
-            this.logger.trace({ removedMessage: removed[0] }, 'History capacity reached, removed oldest message');
+        if (messageToAdd) {
+             if (this.history.length >= this.capacity) {
+                 const removed = this.history.splice(0, 1);
+                 this.logger.trace({ removedMessage: removed[0] }, 'History capacity reached, removed oldest message');
+             }
+             this.history.push(messageToAdd);
+             // Logging is now done within the transformer method
+        } else {
+             // Log here if the transformer returned null, indicating it shouldn't be added
+             this.logger.warn({ processedMessage }, 'ProcessedMessage did not result in a message being added to history (likely assistant message with no text).');
         }
-        this.history.push(message);
-        this.logger.trace({ role, contentLength: content.length }, 'Message added to history');
     }
 
     /**
@@ -157,41 +220,45 @@ class MessageHistoryV2 {
  * Collects messages over a short period and triggers ChatbotV2 to process the batch.
  */
 class MessageProcessorV2 {
-    private requestBasket: MessageContent[] = [];
-    private responseBasket: MessageContent[] = [];
+    private requestBasket: ProcessedMessage[] = [];
+    private responseBasket: ProcessedMessage[] = [];
     private isCollecting: boolean = false;
     private collectingTimer: NodeJS.Timeout | null = null;
     private mutex: Mutex;
     private logger: PinoLogger;
 
-    constructor(private history: MessageHistoryV2,private channelId: string) {
+    constructor(private history: MessageHistoryV2, private channelId: string) {
         this.mutex = new Mutex();
         this.logger = LoggerV2.getLogger().child({ component: 'MessageProcessor', channelId: this.channelId });
-        this.logger.info('MessageProcessorV2 created');
+        this.logger.debug('MessageProcessorV2 created');
     }
 
     /**
      * Processes an incoming message by adding it to the batching queue.
      * Starts the collection timer if not already running.
+     * UPDATED: Accepts messageId and userId.
      */
-    async processIncomingMessage(msg: string, imageUrls?: string[]): Promise<void> {
-        const messageContent: MessageContent = {
-            text: msg,
+    async processIncomingMessage(messageId: string, user: string, text?: string, imageUrls?: string[]): Promise<void> {
+        // UPDATED: Create ProcessedMessage object
+        const message: ProcessedMessage = {
+            messageId,
+            user,
+            text: text && text.trim() ? text.trim() : undefined,
             imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined
         };
-        this.logger.debug({ messageContent }, 'Received message, adding to request basket');
-        this.requestBasket.push(messageContent);
+        this.logger.debug({ message }, 'Received message, adding ProcessedMessage to request basket');
+        this.requestBasket.push(message);
 
-        // Move messages from request to response basket under mutex protection
         await this.transferRequestsToResponseBasket();
 
-        // Start collecting if not already doing so
         if (!this.isCollecting) {
             this.startCollecting();
         } else {
             this.logger.debug('Collecting already in progress, refreshing timer');
-            this.collectingTimer.refresh();
-        }   
+            if (this.collectingTimer) { // Ensure timer exists before refreshing
+               this.collectingTimer.refresh();
+            }
+        }
     }
 
     /**
@@ -201,7 +268,7 @@ class MessageProcessorV2 {
         const release = await this.mutex.acquire();
         try {
             if (this.requestBasket.length > 0) {
-                this.logger.trace({ count: this.requestBasket.length }, 'Acquired lock, moving messages to response basket');
+                this.logger.trace({ count: this.requestBasket.length }, 'Acquired lock, moving ProcessedMessages to response basket');
                 this.responseBasket.push(...this.requestBasket);
                 this.requestBasket = [];
             } else {
@@ -249,28 +316,15 @@ class MessageProcessorV2 {
             }
 
             if (this.responseBasket.length > 0) {
-                this.logger.info({ count: this.responseBasket.length }, 'Processing batched messages');
-                // Combine text and image URLs from the batch
-                let combinedText = "";
-                const combinedImageUrls: string[] = [];
-                this.responseBasket.forEach(content => {
-                    combinedText += content.text + "\n"; // Simple newline separation
-                    if (content.imageUrls) {
-                        combinedImageUrls.push(...content.imageUrls);
-                    }
-                });
-                combinedText = combinedText.trim(); // Remove trailing newline
-
-                const batchToProcess = [...this.responseBasket]; // Copy for logging/potential failure handling
+                this.logger.info({ count: this.responseBasket.length }, 'Processing batched ProcessedMessages');
+                
+                const batchToProcess: ProcessedMessage[] = [...this.responseBasket]; // Copy the batch
                 this.responseBasket = []; // Clear the basket *before* calling the chatbot
 
-                // Trigger ChatbotV2 to handle the actual API call and response
                 try {
-                    await ChatbotV2.handleMessageBatch(this.channelId, combinedText, combinedImageUrls);
+                    await ChatbotV2.handleMessageBatch(this.channelId, batchToProcess);
                 } catch (error) {
                     this.logger.error({ err: error, batch: batchToProcess }, 'Error occurred during ChatbotV2.handleMessageBatch');
-                    // Decide on error handling: retry? notify user? Add back to basket?
-                    // For now, log the error and the batch is lost.
                 }
 
             } else {
@@ -315,7 +369,13 @@ export class ChatbotV2 {
 
     // State
     private openai: OpenAI | undefined;
-    private systemPromptText: string = "You are a helpful assistant."; // Default prompt
+    private systemPromptText: string = "You are a helpful assistant."; // Default prompt for generating the main text response
+    private additionalSystemPromptText: string = "All previous messages in the chat are provided with the following format: \"User: Message\", including your own. In your response, you must not include the user prefix. In addition, you will be talking with several participants at once. You will have context about each message and who said it. This should factor into what you say. While the output of this chat cannot directly produce images, there is a seperate process for creating images. You will be provided the output of this process, labeled as DECISION_OUTPUT, so you will know if image generation is planned with your response. This DECISION_OUTPUT should not be directly used in your response, but it should be used to inform your response. You also know if you had reacted to specific messages with emojis. Specific messages are dictated by their MessageID."; // Additional context for the chatbot
+    private reasoningPromptText: string = "You are an AI assistant responsible for analyzing conversation context and deciding the next steps. Your goal is to determine if a text response is needed, if an image should be generated, and what emoji reactions are appropriate based on the provided message history. The history includes messages with 'MessageID', 'User', 'Text', and potentially 'Images'. You MUST use the 'make_response_decision' tool to output your decisions in the specified JSON format. Focus solely on the decision logic; do not generate response text yourself. Consider the flow of conversation, user requests, and overall engagement when making decisions. Use an empty array [] for emojiReactions if none are suitable. You can react at your own discretion, but you should probably react only around 30% of the time, since reacting to every message would be overwhelming."; // Default prompt for o4-mini decision making
+    private imageGenerationPromptText: string = "You are an expert AI assistant specializing in crafting concise, vivid, and effective prompts for the DALL-E 3 image generation model. Analyze the provided conversation history, paying close attention to the most recent messages and the assistant's latest text response (if available). Generate a single, stand-alone image prompt that accurately reflects the user's request or the conversational context. You should take into account prior descriptions and all details. Output ONLY the prompt text itself, with no additional commentary, quotes, or explanations."; // Default prompt for generating DALL-E prompts
+    private additionalImageGenerationPromptText: string = " All images must be either in the style of something hand-drawn or painted. All drawings should be amateur level and reflect a rough painting or sketch."; // Additional prompt for generating DALL-E prompts
+    // NEW: Prompt for extracting memories upon chat inactivity
+    private memoryExtractionPromptText: string = "You are an AI assistant tasked with analyzing a completed conversation history and summarizing the key takeaways for each participant. Review the entire chat log provided, which includes messages from multiple participants ('User: Name Text...') and the assistant's own messages. Please ignore assistant messages when summarizing. The format of the output should be as follows: 'Participant Name, Key Takeaway 1, Key Takeaway 2, Key Takeaway 3, etc., Personality Traits, Impression'. Do not output conversational text, just the summary.";
     private username: string = "ChatBot";
     private messageHistories: Map<string, MessageHistoryV2> = new Map();
     private messageProcessors: Map<string, MessageProcessorV2> = new Map();
@@ -330,7 +390,6 @@ export class ChatbotV2 {
     private constructor() {
         // Base logger for the chatbot itself
         this.logger = LoggerV2.getLogger().child({ component: 'ChatbotV2' });
-        this.logger.info('ChatbotV2 Singleton constructing...');
         // Initialization logic will be in a separate static method
     }
 
@@ -349,7 +408,7 @@ export class ChatbotV2 {
             return;
         }
         // Ensure base logger is created first
-        const baseLogger = LoggerV2.getLogger(); 
+        const baseLogger = LoggerV2.getLogger();
 
         ChatbotV2.instance = new ChatbotV2();
         ChatbotV2.instance.openai = new OpenAI({ apiKey });
@@ -368,6 +427,13 @@ export class ChatbotV2 {
         return ChatbotV2.instance;
     }
 
+    /**
+     * Gets the configured username of the chatbot.
+     */
+    public static getUsername(): string {
+        return ChatbotV2.getInstance().username;
+    }
+
     // --- Internal Helper Methods ---
 
     /**
@@ -376,7 +442,7 @@ export class ChatbotV2 {
     private _getOrCreateHistory(channelId: string): MessageHistoryV2 {
         if (!this.messageHistories.has(channelId)) {
             this.logger.info({ channelId }, 'Creating new MessageHistoryV2 instance');
-            this.messageHistories.set(channelId, new MessageHistoryV2(this.systemPromptText, channelId));
+            this.messageHistories.set(channelId, new MessageHistoryV2(this.systemPromptText, channelId, 100));
         }
         return this.messageHistories.get(channelId)!;
     }
@@ -398,18 +464,19 @@ export class ChatbotV2 {
      * Entry point for handling an incoming message from Discord.
      * Manages chat active state and delegates processing.
      */
-    public static async handleIncomingDiscordMessage(channelId: string, userId: string, messageText: string, imageUrls?: string[]): Promise<void> {
+    public static async handleIncomingDiscordMessage(channelId: string, messageId: string, user: string, messageText?: string, imageUrls?: string[]): Promise<void> {
         const bot = ChatbotV2.getInstance();
-        const logger = bot.logger.child({ channelId, userId });
-        logger.info({ hasImages: !!imageUrls?.length }, 'Handling incoming Discord message');
+        const logger = bot.logger.child({ channelId, messageId, user });
+        logger.info({ hasText: !!messageText, imageCount: imageUrls?.length ?? 0 }, 'Handling incoming Discord message');
 
         // Mark chat as active and refresh timer
-        ChatbotV2.setChatActiveState(channelId, true);
+        await ChatbotV2.setChatActiveState(channelId, true);
         ChatbotV2.refreshChatTimer(channelId);
 
         const processor = bot._getOrCreateProcessor(channelId);
         try {
-            await processor.processIncomingMessage(messageText, imageUrls);
+            // UPDATED: Pass messageId and userId to processor
+            await processor.processIncomingMessage(messageId, user, messageText, imageUrls);
         } catch (error) {
             logger.error({ err: error }, 'Error processing incoming message via MessageProcessorV2');
              try {
@@ -423,183 +490,390 @@ export class ChatbotV2 {
     /**
      * Handles a batch of messages collected by a MessageProcessor.
      * Constructs context, calls OpenAI, posts response.
+     * UPDATED: Accepts an array of ProcessedMessage objects.
      * INTERNAL: Called by MessageProcessorV2 instance.
      */
-    public static async handleMessageBatch(channelId: string, combinedText: string, combinedImageUrls?: string[]): Promise<void> {
+    public static async handleMessageBatch(channelId: string, messageBatch: ProcessedMessage[]): Promise<void> {
         const bot = ChatbotV2.getInstance();
         const logger = bot.logger.child({ channelId });
-        logger.info({ textLength: combinedText.length, imageCount: combinedImageUrls?.length ?? 0 }, 'Handling message batch');
+        // UPDATED: Logging the batch details
+        logger.info({ batchSize: messageBatch.length, messageIds: messageBatch.map(m => m.messageId) }, 'Handling message batch');
 
-        try {
-            await DiscordClientV2.startTyping(channelId);
-        } catch (typingError) {
-            logger.error({ err: typingError }, "Error starting typing indicator in handleMessageBatch");
-            // Decide if we should continue or abort if typing fails?
-            // For now, we log and continue.
+        if (messageBatch.length === 0) {
+            logger.warn("handleMessageBatch called with an empty batch. Skipping processing.");
+            return;
         }
+
 
         try {
             const history = bot._getOrCreateHistory(channelId);
 
-            // --- 1. Add User Message to History (as before) ---
-            const userMessageContentParts: OpenAI.ChatCompletionContentPart[] = [{ type: "text", text: combinedText }];
-            if (combinedImageUrls && combinedImageUrls.length > 0) {
-                combinedImageUrls.forEach(url => {
-                    if (url && typeof url === 'string' && url.startsWith('http')) {
-                        userMessageContentParts.push({ type: "image_url", image_url: { url: url, detail: "auto" } });
-                    } else {
-                        logger.warn({ url }, 'Skipping invalid image URL in batch');
-                    }
-                });
-            }
-            const historyTextContent = userMessageContentParts.map(part => {
-                 if (part.type === 'text') { return part.text; }
-                 else if (part.type === 'image_url') { return `[Image: ${part.image_url?.url ?? 'invalid_url'}]`; }
-                 return '[Unsupported Content Part]';
-             }).join('\n');
-            history.addMessage('user', historyTextContent);
+            
+            // --- 1. Prepare Base Message Data --- 
+            const historyMessages = history.getHistory(); // Get current history (user/assistant turns ONLY)
+            
+            // Construct the user message content for the API call from the batch
+            const userMessages: ChatCompletionMessageParam[] = [];
+            messageBatch.forEach(msg => {
+                const part: OpenAI.ChatCompletionContentPart[] = [];
+                // Add text part if present
+                if (msg.text) {
+                    // For simplicity now, just adding the text directly.
+                    part.push({ type: "text", text: `MessageID: ${msg.messageId}, User: ${msg.user} Text: ${msg.text}` });
+                }
+                // Add image parts if present
+                if (msg.imageUrls) {
+                    msg.imageUrls.forEach(url => {
+                        if (url && typeof url === 'string' && url.startsWith('http')) {
+                            part.push({ type: "image_url", image_url: { url: url, detail: "auto" } });
+                        } else {
+                            logger.warn({ url, messageId: msg.messageId }, 'Skipping invalid image URL in batch');
+                        }
+                    });
+                }
 
-            // --- 2. Prepare API Request --- 
-            const systemPromptMsg = history.getSystemPrompt();
-            const historyMessages = history.getHistory();
-            const messages: ChatCompletionMessageParam[] = [
-                systemPromptMsg,
-                ...historyMessages.slice(-10), // TEMP limit
-                { role: "user", content: userMessageContentParts }
+                if (part.length > 0) {
+                    userMessages.push({ role: "user", content: part });
+                }
+            });
+
+            // Ensure there's at least one part to send, otherwise, OpenAI might error
+            if (userMessages.length === 0) {
+                logger.warn("Message batch resulted in no content parts for OpenAI. Skipping API call.");
+                // Optionally send a message like "I received your message(s) but couldn't process empty content."
+                return;
+            }
+
+            // Base message history (excluding system prompt for now)
+            const baseMessages: ChatCompletionMessageParam[] = [
+                 ...historyMessages.slice(-10), // Use recent history
+                 ...userMessages // Add the current batch content
             ];
 
-            // --- 3. Call OpenAI API --- 
-            let structuredResponse: ChatBotResponseV2 | null = null;
-            let apiErrorOccurred = false;
+            // --- 3. Add User Message(s) Representation to History --- 
+            messageBatch.forEach(msg => {
+                if (msg.text) {
+                     history.addMessage(msg);
+                }
+            });
+
+            // --- 4. Get Decision Logic from o4-mini ---
+            let decision: DecisionResponse | null = null;
+            let decisionErrorOccurred = false;
             try {
-                logger.debug({ messageCount: messages.length }, 'Sending request to OpenAI Chat Completion API (expecting tool call)');
-                structuredResponse = await bot._chatCompletionApiCall(messages);
+                // Construct messages for decision logic
+                const decisionRequestMessages: ChatCompletionMessageParam[] = [
+                    { role: "system", content: bot.reasoningPromptText },
+                    ...baseMessages
+                ];
+                decision = await bot._getDecisionLogic(decisionRequestMessages); // Pass full messages including system prompt
+                if (decision) {
+                     logger.debug({ decision }, `Received and parsed decision from ${DECISION_MODEL}`);
+                }
             } catch (error) {
-                apiErrorOccurred = true;
-                logger.error({ err: error }, 'Error calling OpenAI Chat Completion API or parsing response');
+                decisionErrorOccurred = true;
+                if (!String(error).includes(`during ${DECISION_MODEL} API call`)) {
+                    logger.error({ err: error }, `Error processing decision logic after API call`);
+                }
                 try {
-                    await DiscordClientV2.postMessage("I encountered an error while thinking. Please try again.", channelId);
-                } catch (discordError) {
-                    logger.error({ err: discordError }, 'Failed to post API error message to Discord');
-                }
-            } 
-            
-            // --- 4. Process Structured Response --- 
-            if (structuredResponse && !apiErrorOccurred) { // Only process if API call succeeded
-                logger.info({ responseData: structuredResponse }, 'Received structured response from API call helper');
-                const assistantResponseText = structuredResponse.response;
+                    await DiscordClientV2.postMessage("I encountered an error while deciding what to do. Please try again.", channelId);
+                } catch { /* Ignore */ }
+            }
 
-                // Handle text response
-                if (structuredResponse.shouldRespond && assistantResponseText) {
-                    history.addMessage('assistant', assistantResponseText);
-                    try {
-                        logger.info({ responseLength: assistantResponseText.length }, 'Posting text response to Discord');
-                        await DiscordClientV2.postMessage(assistantResponseText, channelId);
-                        logger.debug('Text response posted.');
-                    } catch (error) {
-                        logger.error({ err: error }, 'Failed to post text response message to Discord');
+            // --- 5. Process Decision ---
+            if (decision && !decisionErrorOccurred) {
+                logger.info({ decision }, 'Received decision from API');
+
+                // --- 5a. Handle Emoji Reactions (Immediately) ---
+                if (decision.emojiReactions && decision.emojiReactions.length > 0) {
+                    logger.info({ reactions: decision.emojiReactions }, 'Attempting emoji reactions.');
+                    for (const reactionItem of decision.emojiReactions) {
+                        const { messageId: msgId, emoji } = reactionItem;
+                        if (!msgId || !emoji) {
+                             logger.warn({ reactionItem }, 'Skipping reaction due to invalid item (missing ID or emoji).');
+                             continue;
+                        }
+                        // Check if the message ID exists in the current batch or recent history for context
+                        // (Simple check against batch for now)
+                        if (messageBatch.some(m => m.messageId === msgId)) {
+                           try {
+                               logger.debug({ msgId, emoji }, 'Attempting to add reaction');
+                               await DiscordClientV2.addReaction(emoji, msgId, channelId);
+                           } catch (reactError) {
+                               // Log non-critically, don't stop processing for reaction failure
+                               logger.warn({ err: reactError, msgId, emoji }, 'Failed to add suggested emoji reaction');
+                           }
+                        } else {
+                             logger.warn({ msgId, emoji }, 'AI suggested reaction for message ID not in the current batch, skipping.');
+                        }
                     }
-                } else {
-                    logger.info('Assistant decided not to send a text response (shouldRespond=false or empty response).');
                 }
 
-                // Handle image generation
-                if (structuredResponse.shouldGenerateImage) {
-                    logger.info('Assistant decided to generate an image.');
+                let assistantResponseText: string | null = null;
+                let imagePrompt: string | null = null;
+                let imageUrl: string | null = null;
+
+                // --- 5b. Generate Text Response (if needed) ---
+                if (decision.shouldRespond) {
+                    logger.info('Decision includes generating a text response.');
                     try {
-                        const imagePrompt = assistantResponseText || combinedText;
-                        const imageUrl = await ChatbotV2.generateImage(imagePrompt);
-                        if (imageUrl) {
-                            logger.info({ imageUrl }, 'Image generated, attempting to fetch and post');
-                            const attachment = await bot._fetchImageAsAttachment(imageUrl);
-                            if (attachment) {
-                                await DiscordClientV2.postImage(attachment, channelId);
-                                logger.info('Successfully posted generated image to Discord.');
-                            } else {
-                                logger.error('Failed to fetch image or create attachment from URL.');
-                                await DiscordClientV2.postMessage("I generated an image, but couldn't post it. Sorry!", channelId);
+                        await DiscordClientV2.startTyping(channelId);
+                    } catch (typingError) {
+                        logger.error({ err: typingError }, "Error starting typing indicator in handleMessageBatch");
+                    }
+                    try {
+                        // Construct messages for text generation
+                         const generationRequestMessages: ChatCompletionMessageParam[] = [
+                             { role: "system", content: `${bot.systemPromptText} ${bot.additionalSystemPromptText}`}, // Use main system prompt
+                             ...history.getHistory(), // Get LATEST history, potentially including user messages just added
+                             { role: "assistant", content: `DECISION_OUTPUT: ${JSON.stringify(decision)}`}
+                         ];
+                        assistantResponseText = await bot._generateResponseText(generationRequestMessages); // Pass full messages including system prompt
+
+                        if (assistantResponseText) {
+                            logger.info({ responseLength: assistantResponseText.length }, `Generated text response using ${GENERATION_MODEL}`);
+                            // Construct ProcessedMessage for assistant text response
+                            const assistantMessage: ProcessedMessage = {
+                                messageId: "", // Or a unique identifier for the assistant response
+                                user: bot.username,
+                                text: assistantResponseText
+                                // No imageUrls
+                            };
+                            history.addMessage(assistantMessage); // Add assistant text response to history
+
+                            // Post the text response to Discord
+                            try {
+                                const normalizedResponse = bot._normalizeAssistantResponse(assistantResponseText, bot.username);
+                                await DiscordClientV2.postMessage(normalizedResponse, channelId);
+                                logger.debug('Text response posted.');
+                            } catch (error) {
+                                logger.error({ err: error }, 'Failed to post text response message to Discord');
+                                // Continue processing image generation even if text posting fails
                             }
                         } else {
-                            logger.error('Image generation call returned no URL.');
-                            await DiscordClientV2.postMessage("I tried to generate an image, but something went wrong.", channelId);
+                            logger.warn('generateResponseText returned null or empty string.');
+                            // Don't add empty assistant message to history
+                        }
+                    } catch (genError) {
+                         logger.error({ err: genError }, `Error during text generation with ${GENERATION_MODEL}`);
+                         // Attempt to post error, but continue if image generation is requested
+                         try {
+                             await DiscordClientV2.postMessage("I had trouble generating my response text.", channelId);
+                         } catch { /* Ignore nested error */ }
+                    }
+                } else {
+                    logger.info('Decision: No text response needed.');
+                }
+
+                // --- 5c. Generate Image (if needed) ---
+                if (decision.shouldGenerateImage) {
+                    logger.info('Decision includes generating an image.');
+                    try {
+                        // Construct messages for image prompt generation
+                        const imagePromptRequestMessages: ChatCompletionMessageParam[] = [
+                             ...history.getHistory(),
+                        ];
+                        imagePrompt = await bot._generateImagePrompt(imagePromptRequestMessages); // Pass context messages
+
+                        if (imagePrompt) {
+                            logger.info({ imagePrompt }, `Generated image prompt using ${GENERATION_MODEL}`);
+                            imageUrl = await ChatbotV2.generateImage(imagePrompt); // Uses DALL-E 3 constant
+
+                            if (imageUrl) {
+                                logger.info({ imageUrl }, 'Image generated, attempting to fetch and post');
+                                const attachment = await bot._fetchImageAsAttachment(imageUrl);
+                                if (attachment) {
+                                    await DiscordClientV2.postImage(attachment, channelId);
+                                    logger.info('Successfully posted generated image to Discord.');
+
+                                    // Construct ProcessedMessage for assistant image post
+                                    const assistantMessage: ProcessedMessage = {
+                                        messageId: "",
+                                        user: bot.username,
+                                        text: `Assistant generated an image with prompt: ${imagePrompt || '(prompt unavailable)'}`,
+                                        imageUrls: [imageUrl]
+                                    };
+                                    history.addMessage(assistantMessage); // Add image post info to history
+
+                                } else {
+                                    logger.error('Failed to fetch image or create attachment from URL.');
+                                    await DiscordClientV2.postMessage("I generated an image, but couldn't post it. Sorry!", channelId);
+                                }
+                            } else {
+                                logger.error('Image generation call returned no URL.');
+                                await DiscordClientV2.postMessage("I tried to generate an image, but something went wrong with the generation step.", channelId);
+                            }
+                        } else {
+                             logger.error(`Failed to generate an image prompt using ${GENERATION_MODEL}.`);
+                             await DiscordClientV2.postMessage("I wanted to generate an image, but couldn't think of a good prompt.", channelId);
                         }
                     } catch (imgError) {
                         logger.error({ err: imgError }, 'Error during image generation or posting process');
-                        await DiscordClientV2.postMessage("I had trouble generating or posting the image.", channelId);
-                    } 
+                        // Attempt to post a user-friendly error message
+                        try {
+                             await DiscordClientV2.postMessage("I encountered an error while trying to generate or post the image.", channelId);
+                        } catch { /* Ignore nested error */ }
+                    }
+                } else {
+                    logger.info('Decision: No image generation needed.');
                 }
 
-            } else if (!apiErrorOccurred) {
-                // Handle case where API call succeeded but returned null (e.g., bad tool parsing after retries)
-                logger.error('No structured response received from API call helper, despite no thrown error during call.');
-                history.addMessage('assistant', "[Bot encountered an internal error processing the response]");
-                await DiscordClientV2.postMessage("Sorry, I had a problem understanding the response I got.", channelId);
-            }
-            // If apiErrorOccurred, error message already sent in the catch block
 
-        } catch (error) { // Catch errors from steps *before* or *after* the API call try/catch
+            } else if (!decisionErrorOccurred) {
+                logger.error(`No decision response received from ${DECISION_MODEL}, despite no thrown error during call.`);
+                try {
+                     await DiscordClientV2.postMessage("Sorry, I had a problem understanding the decision I received.", channelId);
+                } catch { /* Ignore */ }
+            }
+
+        } catch (error) {
             logger.error({ err: error }, 'Unhandled error during handleMessageBatch main processing block');
             try {
                 await DiscordClientV2.postMessage("An unexpected error occurred while handling your message batch.", channelId);
             } catch (discordError) {
-                logger.error({ err: discordError }, 'Failed to post error message to Discord during outer batch catch.');
+                logger.error({ err: discordError }, 'Failed to post error message/stop typing during outer batch catch.');
             }
         }
     }
 
-    /**
-     * Calls the OpenAI Chat Completion API, expecting a tool call for structured response.
-     * Parses the tool call arguments.
-     * Private helper method.
-     */
-    private async _chatCompletionApiCall(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<ChatBotResponseV2 | null> {
+    // NEW: Method for getting decision logic from o4-mini
+    private async _getDecisionLogic(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<DecisionResponse | null> {
         if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
-        this.logger.trace({ attempt: attempts + 1, messageCount: messages.length }, 'Making OpenAI chat completion call (expecting tool)');
+        const params: ChatCompletionCreateParams = {
+            model: DECISION_MODEL,
+            messages: messages,
+            tools: [DECISION_TOOL_SCHEMA],
+            tool_choice: { type: "function", function: { name: DECISION_TOOL_SCHEMA.function.name } },
+        };
+        this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: messages.length, toolChoice: params.tool_choice }, `Requesting decision logic from ${DECISION_MODEL}`);
         try {
-            const params: ChatCompletionCreateParams = {
-                model: CHAT_COMPLETION_MODEL,
-                messages: messages,
-                tools: [RESPONSE_TOOL_SCHEMA], // Provide the tool schema
-                tool_choice: { type: "function", function: { name: RESPONSE_TOOL_SCHEMA.function.name } }, // Force use of our tool
-                temperature: 0.7,
-            };
             const response = await this.openai.chat.completions.create(params);
-            this.logger.trace({ choice: response.choices[0] }, 'Received OpenAI response');
-
             const toolCalls = response.choices[0]?.message?.tool_calls;
-            if (toolCalls && toolCalls[0]?.function?.name === RESPONSE_TOOL_SCHEMA.function.name) {
+            if (toolCalls && toolCalls[0]?.function?.name === DECISION_TOOL_SCHEMA.function.name) {
                 const argsString = toolCalls[0].function.arguments;
-                this.logger.debug({ argsString }, 'Attempting to parse tool arguments');
+                this.logger.debug({ argsString }, 'Attempting to parse decision tool arguments');
                 try {
-                    const args = JSON.parse(argsString) as ChatBotResponseV2;
-                    // Basic validation of the parsed structure
-                    if (typeof args.shouldRespond === 'boolean' &&
-                        typeof args.response === 'string' &&
-                        typeof args.shouldGenerateImage === 'boolean') {
-                        return args;
-                    } else {
-                        this.logger.error({ args }, 'Parsed tool arguments have incorrect structure/types');
-                        throw new Error('Parsed tool arguments have incorrect structure/types');
+                    const args = JSON.parse(argsString) as Partial<DecisionResponse>;
+
+                    // Validate required fields
+                    if (typeof args.shouldRespond !== 'boolean' ||
+                        typeof args.shouldGenerateImage !== 'boolean' ||
+                        !Array.isArray(args.emojiReactions)) { // Check if array, even if empty
+                         this.logger.error({ args }, 'Parsed decision tool arguments missing required fields or have incorrect types');
+                         throw new Error('Parsed decision tool arguments missing required fields or have incorrect types');
                     }
+
+                    // Validate emojiReactions items
+                    let validatedEmojiReactions: Array<{ messageId: string; emoji: string }> = [];
+                    if (Array.isArray(args.emojiReactions)) {
+                        for (const item of args.emojiReactions) {
+                            // Ensure correct property names (messageId vs MessageID)
+                            if (item && typeof item === 'object' &&
+                                typeof item.messageId === 'string' && typeof item.emoji === 'string') {
+                                validatedEmojiReactions.push({ messageId: item.messageId, emoji: item.emoji });
+                            } else {
+                                this.logger.warn({ item }, 'Invalid item found in emojiReactions array, skipping.');
+                            }
+                        }
+                    }
+
+                    const finalDecision: DecisionResponse = {
+                        shouldRespond: args.shouldRespond,
+                        shouldGenerateImage: args.shouldGenerateImage,
+                        emojiReactions: validatedEmojiReactions
+                    };
+                    return finalDecision;
+
                 } catch (parseError) {
-                     this.logger.error({ err: parseError, argsString }, 'Failed to parse tool arguments JSON');
-                     throw new Error('Failed to parse tool arguments from OpenAI response.'); // Rethrow to trigger retry/error handling
+                     this.logger.error({ err: parseError, argsString }, 'Failed to parse decision tool arguments JSON or validation failed');
+                     const errorMessage = parseError instanceof Error ? parseError.message : 'Failed to parse/validate decision tool arguments.';
+                     throw new Error(errorMessage);
                 }
             } else {
-                this.logger.error({ responseMessage: response.choices[0]?.message }, 'OpenAI response did not contain the expected tool call');
-                throw new Error('OpenAI response did not use the expected tool.'); // Rethrow to trigger retry/error handling
+                this.logger.error({ responseMessage: response.choices[0]?.message }, `Response from ${DECISION_MODEL} did not contain the expected tool call '${DECISION_TOOL_SCHEMA.function.name}'`);
+                throw new Error(`Response from ${DECISION_MODEL} did not use the expected tool.`);
             }
         } catch (error) {
-            this.logger.error({ err: error, attempt: attempts + 1 }, 'Error during OpenAI API call or tool processing');
+            this.logger.error({ err: error, attempt: attempts + 1, model: DECISION_MODEL }, `Error during ${DECISION_MODEL} API call`);
             if (attempts < 2) {
                 await delay(200 * (attempts + 1));
-                return await this._chatCompletionApiCall(messages, attempts + 1);
+                return await this._getDecisionLogic(messages, attempts + 1);
             } else {
-                this.logger.error('Final attempt failed for OpenAI chat completion tool call');
-                // Do not throw here, return null to indicate final failure to the caller
-                return null;
+                this.logger.error(`Final attempt failed for ${DECISION_MODEL} decision tool call`);
+                throw new Error(`Failed to get decision from ${DECISION_MODEL} after multiple attempts: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
+    }
+
+    // NEW: Method for generating text response using 4o
+    private async _generateResponseText(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<string | null> {
+         if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
+         const params: ChatCompletionCreateParams = {
+            model: GENERATION_MODEL,
+            messages: messages,
+            temperature: 0.7, // Adjust as needed
+            max_tokens: 500, // Set a reasonable limit for response text
+         };
+         this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: messages.length, temperature: params.temperature, max_tokens: params.max_tokens }, `Requesting text generation from ${GENERATION_MODEL}`);
+         try {
+            const response = await this.openai.chat.completions.create(params);
+            const content = response.choices[0]?.message?.content;
+            if (content) {
+                this.logger.info({ responseLength: content.length, model: GENERATION_MODEL }, `Generated text response using ${GENERATION_MODEL}`);
+                return content.trim();
+            } else {
+                 this.logger.warn({ model: GENERATION_MODEL },'Text generation response content was null or empty.');
+                 return null; // Indicate no text generated
+            }
+         } catch (error) {
+            this.logger.error({ err: error, attempt: attempts + 1, model: GENERATION_MODEL }, `Error during ${GENERATION_MODEL} text generation call`);
+            if (attempts < 2) {
+                await delay(300 * (attempts + 1)); // Slightly longer delay?
+                return await this._generateResponseText(messages, attempts + 1);
+            } else {
+                this.logger.error(`Final attempt failed for ${GENERATION_MODEL} text generation`);
+                throw new Error(`Failed to generate text response from ${GENERATION_MODEL} after multiple attempts: ${error instanceof Error ? error.message : String(error)}`);
+            }
+         }
+    }
+
+    // NEW: Method for generating an image prompt using 4o
+    private async _generateImagePrompt(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<string | null> {
+         if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
+         const promptGenMessages: ChatCompletionMessageParam[] = [
+             { role: "system", content: this.imageGenerationPromptText }, 
+              ...messages
+         ];
+
+         const params: ChatCompletionCreateParams = {
+             model: GENERATION_MODEL,
+             messages: promptGenMessages, // Use the array with the system prompt added
+             temperature: 0.6, // Slightly lower temp for focused prompt?
+             max_tokens: 300, // Prompts shouldn't be excessively long
+         };
+         this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: promptGenMessages.length, temperature: params.temperature, max_tokens: params.max_tokens }, `Requesting image prompt generation from ${GENERATION_MODEL}`);
+         try {
+            const response = await this.openai.chat.completions.create(params);
+            const prompt = response.choices[0]?.message?.content;
+            if (prompt) {
+                const finalPrompt = prompt.concat(this.additionalImageGenerationPromptText).trim().replace(/^["']|["']$/g, "");
+                this.logger.info({ promptLength: finalPrompt.length, model: GENERATION_MODEL }, `Generated image prompt using ${GENERATION_MODEL}`);
+                // Clean up prompt (remove quotes, etc.) if necessary
+                return finalPrompt; // Remove leading/trailing quotes
+            } else {
+                 this.logger.warn({ model: GENERATION_MODEL }, 'Image prompt generation response content was null or empty.');
+                 return null;
+            }
+         } catch (error) {
+            this.logger.error({ err: error, attempt: attempts + 1, model: GENERATION_MODEL }, `Error during ${GENERATION_MODEL} image prompt generation call`);
+            if (attempts < 2) {
+                await delay(300 * (attempts + 1));
+                return await this._generateImagePrompt(messages, attempts + 1);
+            } else {
+                this.logger.error(`Final attempt failed for ${GENERATION_MODEL} image prompt generation`);
+                throw new Error(`Failed to generate image prompt from ${GENERATION_MODEL} after multiple attempts: ${error instanceof Error ? error.message : String(error)}`);
+            }
+         }
     }
 
     /**
@@ -627,22 +901,26 @@ export class ChatbotV2 {
     public static async createEmbedding(text: string, attempts: number = 0): Promise<number[] | null> {
          const bot = ChatbotV2.getInstance();
          if (!bot.openai) throw new Error('OpenAI client not initialized');
-         bot.logger.trace({ attempt: attempts + 1, textLength: text.length }, 'Requesting embedding from OpenAI');
+         const params = { model: EMBEDDING_MODEL, input: text };
+         bot.logger.debug({ attempt: attempts + 1, model: params.model, textLength: text.length }, `Requesting embedding from ${EMBEDDING_MODEL}`);
          try {
-             const response = await bot.openai.embeddings.create({
-                 model: EMBEDDING_MODEL,
-                 input: text,
-             });
-             bot.logger.trace('Received embedding response from OpenAI');
-             return response.data[0]?.embedding || null;
+             const response = await bot.openai.embeddings.create(params);
+             const embedding = response.data[0]?.embedding;
+             if (embedding) {
+                 bot.logger.debug({ model: EMBEDDING_MODEL, embeddingLength: embedding.length }, `Received embedding response from ${EMBEDDING_MODEL}`);
+                 return embedding;
+             } else {
+                 bot.logger.warn({ model: EMBEDDING_MODEL }, 'Embedding response did not contain embedding data.');
+                 return null;
+             }
          } catch (error) {
-             bot.logger.error({ err: error, attempt: attempts + 1 }, 'Error during OpenAI embedding call');
+             bot.logger.error({ err: error, attempt: attempts + 1, model: EMBEDDING_MODEL }, `Error during ${EMBEDDING_MODEL} embedding call`);
              if (attempts < 2) {
                 await delay(200 * (attempts + 1));
                 return await ChatbotV2.createEmbedding(text, attempts + 1);
              } else {
-                bot.logger.error('Final attempt failed for OpenAI embedding call');
-                return null; // Return null on final failure
+                bot.logger.error(`Final attempt failed for ${EMBEDDING_MODEL} embedding call`);
+                throw new Error(`Failed to create embedding from ${EMBEDDING_MODEL} after multiple attempts: ${error instanceof Error ? error.message : String(error)}`);
             }
          }
     }
@@ -654,25 +932,30 @@ export class ChatbotV2 {
     public static async generateImage(prompt: string, attempts: number = 0): Promise<string | null> {
         const bot = ChatbotV2.getInstance();
         if (!bot.openai) throw new Error('OpenAI client not initialized');
-        bot.logger.info({ prompt, attempt: attempts + 1 }, 'Requesting image generation from OpenAI');
+        const params: OpenAI.ImageGenerateParams = {
+             model: IMAGE_GENERATION_MODEL,
+             prompt: prompt,
+             n: 1, // Generate one image
+             size: "1024x1024" // Explicitly use allowed literal type
+        };
+        bot.logger.info({ model: params.model, prompt: params.prompt, n: params.n, size: params.size, attempt: attempts + 1 }, `Requesting image generation from ${IMAGE_GENERATION_MODEL}`);
         try {
-            const response = await bot.openai.images.generate({
-                model: IMAGE_GENERATION_MODEL,
-                prompt: prompt,
-                n: 1, // Generate one image
-                size: "1024x1024" // Example size
-            });
+            const response = await bot.openai.images.generate(params);
             const imageUrl = response.data[0]?.url;
-            bot.logger.info({ imageUrl }, 'Received image generation response from OpenAI');
+            if (imageUrl) {
+                bot.logger.info({ imageUrl, model: IMAGE_GENERATION_MODEL }, `Received image generation response from ${IMAGE_GENERATION_MODEL}`);
+            } else {
+                bot.logger.warn({ model: IMAGE_GENERATION_MODEL }, 'Image generation response did not contain a URL.');
+            }
             return imageUrl || null;
         } catch (error) {
-            bot.logger.error({ err: error, prompt, attempt: attempts + 1 }, 'Error during OpenAI image generation call');
+            bot.logger.error({ err: error, prompt: params.prompt, model: IMAGE_GENERATION_MODEL, attempt: attempts + 1 }, `Error during ${IMAGE_GENERATION_MODEL} image generation call`);
              if (attempts < 2) {
                 await delay(500 * (attempts + 1)); // Longer delay for DALL-E?
                 return await ChatbotV2.generateImage(prompt, attempts + 1);
              } else {
-                bot.logger.error('Final attempt failed for OpenAI image generation call');
-                return null; // Return null on final failure
+                bot.logger.error(`Final attempt failed for ${IMAGE_GENERATION_MODEL} image generation call`);
+                throw new Error(`Failed to generate image from ${IMAGE_GENERATION_MODEL} after multiple attempts: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
     }
@@ -686,31 +969,34 @@ export class ChatbotV2 {
 
     public static resetHistory(channelId: string): void {
         const bot = ChatbotV2.getInstance();
-        bot._getOrCreateHistory(channelId).clear();
+        const historyInstance = bot._getOrCreateHistory(channelId); // Get the history instance
+
+        // Log the history before clearing
+        const fullHistory = historyInstance.getHistory();
+        bot.logger.info({ channelId, history: fullHistory }, 'Chat history before reset');
+
+        historyInstance.clear(); // Clear the history
         bot.logger.info({ channelId }, 'Chat history reset');
-        
-        // Stop the processor and its potential timer
-        bot.messageProcessors.get(channelId)?.stop(); 
-        bot.messageProcessors.delete(channelId);
-        
-        // Also stop the main inactivity timer and typing loop for the channel
-        ChatbotV2.clearChatTimer(channelId);
-        ChatbotV2.setChatActiveState(channelId, false); // Ensure chat is marked inactive
     }
 
-    public static setChatActiveState(channelId: string, state: boolean): void {
+    public static async setChatActiveState(channelId: string, state: boolean): Promise<void> {
         // If the state is already set to the desired state, do nothing
-        if (state === this.getChatActiveState(channelId)) {
+        if (state === ChatbotV2.getChatActiveState(channelId)) {
             return;
         }
 
         const bot = ChatbotV2.getInstance();
         bot.activeChats.set(channelId, state);
-        bot.logger.debug({ channelId, state }, 'Chat active state updated');
+        bot.logger.info({ channelId, state }, 'Chat active state updated');
         if (!state) {
             // Use static access
             ChatbotV2.clearChatTimer(channelId);
             bot.messageProcessors.get(channelId)?.stop();
+            // Remove the processor instance when chat goes inactive
+            bot.messageProcessors.delete(channelId);
+            bot.logger.debug({ channelId }, 'Stopped and removed message processor due to inactivity.');
+            // Extract memories before setting inactive
+            await bot._extractAndLogConversationMemories(channelId)
         }
     }
 
@@ -724,14 +1010,15 @@ export class ChatbotV2 {
         // Use static access
         ChatbotV2.clearChatTimer(channelId);
 
-        const timer = setTimeout(() => {
+        const timer = setTimeout(async () => { // Make the callback async
             bot.logger.info({ channelId, timeout: ChatbotV2.INACTIVITY_TIMEOUT_MS }, 'Chat inactivity timeout reached');
+
             // Use static access
-            ChatbotV2.setChatActiveState(channelId, false);
+            await ChatbotV2.setChatActiveState(channelId, false);
         }, ChatbotV2.INACTIVITY_TIMEOUT_MS);
 
         bot.activeChatTimers.set(channelId, timer);
-        bot.logger.trace({ channelId }, 'Chat inactivity timer refreshed');
+        bot.logger.debug({ channelId }, 'Chat inactivity timer refreshed');
     }
 
     public static clearChatTimer(channelId: string): void {
@@ -739,7 +1026,7 @@ export class ChatbotV2 {
         if (bot.activeChatTimers.has(channelId)) {
             clearTimeout(bot.activeChatTimers.get(channelId)!);
             bot.activeChatTimers.delete(channelId);
-            bot.logger.trace({ channelId }, 'Chat inactivity timer cleared');
+            bot.logger.debug({ channelId }, 'Chat inactivity timer cleared');
         }
     }
 
@@ -753,5 +1040,85 @@ export class ChatbotV2 {
          bot.activeChatTimers.clear();
          bot.activeChats.clear();
          // Note: Doesn't clear histories
+    }
+
+    /**
+     * Helper to normalize the assistant's response text by removing an unwanted prefix.
+     */
+    private _normalizeAssistantResponse(responseText: string, botUsername: string): string {
+        const prefix = `${botUsername}: `;
+        if (responseText.startsWith(prefix)) {
+            this.logger.debug({ originalLength: responseText.length, prefixLength: prefix.length }, 'Normalizing assistant response: Removed prefix');
+            return responseText.substring(prefix.length);
+        }
+        return responseText; // Return original if prefix not found
+    }
+
+    // NEW: Method for generating a memory summary using the decision model
+    private async _generateMemorySummary(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<string | null> {
+        if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
+        const summaryMessages: ChatCompletionMessageParam[] = [
+            { role: "system", content: this.memoryExtractionPromptText },
+            ...messages // Include the full history passed in
+        ];
+
+        const params: ChatCompletionCreateParams = {
+            model: DECISION_MODEL, // Use the decision model for analysis as requested
+            messages: summaryMessages,
+            max_completion_tokens: 25000,
+            reasoning_effort: "high"
+        };
+        this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: summaryMessages.length }, `Requesting memory summary from ${DECISION_MODEL}`);
+        try {
+            const response = await this.openai.chat.completions.create(params);
+            const content = response.choices[0]?.message?.content;
+            if (content) {
+                this.logger.info({ summaryLength: content.length, model: DECISION_MODEL }, `Generated memory summary using ${DECISION_MODEL}`);
+                return content.trim();
+            } else {
+                this.logger.warn({ model: DECISION_MODEL }, 'Memory summary generation response content was null or empty.');
+                return null;
+            }
+        } catch (error) {
+            this.logger.error({ err: error, attempt: attempts + 1, model: DECISION_MODEL }, `Error during ${DECISION_MODEL} memory summary generation call`);
+            if (attempts < 1) { // Retry only once for this non-critical task?
+                await delay(300 * (attempts + 1));
+                return await this._generateMemorySummary(messages, attempts + 1);
+            } else {
+                this.logger.error(`Final attempt failed for ${DECISION_MODEL} memory summary generation`);
+                // Don't throw, just return null as it's not critical for chat operation
+                return null;
+            }
+        }
+    }
+
+
+    // NEW: Method to extract and log conversation memories
+    private async _extractAndLogConversationMemories(channelId: string): Promise<void> {
+        const logger = this.logger.child({ channelId, action: 'extractMemory' });
+        logger.info('Attempting to extract conversation memories upon inactivity.');
+
+        try {
+            const history = this._getOrCreateHistory(channelId); // Should exist if chat was active
+            const conversationHistory = history.getHistory();
+
+            if (conversationHistory.length === 0) {
+                logger.info('No conversation history found to analyze for memories.');
+                return;
+            }
+
+            const memorySummary = await this._generateMemorySummary(conversationHistory);
+
+            if (memorySummary) {
+                // For now, just log the summary. Could be stored elsewhere later.
+                logger.info({ memorySummary }, 'Successfully generated conversation memory summary.');
+                // TODO: Potentially store this summary associated with the channel or user IDs.
+            } else {
+                logger.warn('Failed to generate a memory summary for the conversation.');
+            }
+
+        } catch (error) {
+            logger.error({ err: error }, 'Error occurred during memory extraction process.');
+        }
     }
 } 

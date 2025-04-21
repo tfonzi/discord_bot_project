@@ -2,32 +2,12 @@ import { Client, ClientOptions, TextChannel, Message, AttachmentBuilder, GuildEm
 import { LoggerV2 } from "../logger/loggerV2";
 import { Logger as PinoLogger, Bindings } from 'pino';
 import { delay } from "./utils";
-import * as emojiDictionary from 'emoji-dictionary'; // Import emoji dictionary
-
-// Interface defining the structure for managing typing loops per channel
-interface TypingLoopState {
-    intervalId: NodeJS.Timeout | null;
-    isPaused: boolean;
-    stopRequested: boolean; // Flag to signal loop termination
-}
-
-// Interface for the emoji object structure
-interface EmojiInfo {
-    emoji: string; // The emoji string (unicode or custom format)
-    name: string;  // The name of the emoji
-    description: string; // Description (e.g., "Custom" or "Standard Unicode")
-}
 
 export class DiscordClientV2 {
     private static instance: Client<boolean>;
 
     // Map to store child loggers per channel
     private static channelLoggers: Map<string, PinoLogger> = new Map();
-
-    // Emoji Cache
-    private static readonly EMOJI_CACHE_TTL = 2 * 60 * 1000; // 2 minutes in milliseconds
-    private static emojiCache: EmojiInfo[] | null = null;
-    private static emojiCacheExpiry: number | null = null;
 
     // Private constructor to prevent external instantiation
     private constructor() { }
@@ -115,8 +95,6 @@ export class DiscordClientV2 {
         DiscordClientV2.instance = undefined;
         // Clear channel loggers
         DiscordClientV2.channelLoggers.clear();
-        DiscordClientV2.emojiCache = null;
-        DiscordClientV2.emojiCacheExpiry = null;
     }
 
 
@@ -263,75 +241,6 @@ export class DiscordClientV2 {
             } else {
                 logger.error({ emoji, messageId }, `Final attempt failed for addReaction`);
                 throw err;
-            }
-        }
-    }
-
-    /**
-     * Retrieves a list of available emojis (custom and standard Unicode) in the guild associated with the channel.
-     * @param channelId The ID of the channel.
-     * @param attempts The current attempt number (internal use for recursion).
-     * @returns A Promise resolving to an array of EmojiInfo objects.
-     * @throws Error if the client is not ready, guild not found, or after multiple failed attempts.
-     */
-    public static async getAvailableEmojis(channelId: string, attempts: number = 0): Promise<EmojiInfo[]> {
-        const logger = DiscordClientV2._getDiscordLogger(channelId); // Pass channelId
-        // --- Check Cache First ---
-        if (DiscordClientV2.emojiCache && DiscordClientV2.emojiCacheExpiry && Date.now() < DiscordClientV2.emojiCacheExpiry) {
-            logger.debug(`Returning cached emojis.`);
-            return DiscordClientV2.emojiCache;
-        }
-
-        const client = DiscordClientV2.getClient(); // Throws if not created
-        if (!client.isReady()) {
-            throw new Error("Client is not ready yet for getAvailableEmojis.");
-        }
-        try {
-            // --- Get Custom Guild Emojis ---
-            const guildId = DiscordClientV2.getGuildId(channelId); // Use static method
-            const guild = client.guilds.cache.get(guildId);
-            if (!guild) {
-                throw new Error(`Guild with ID ${guildId} not found in cache.`);
-            }
-
-            const customEmojis: EmojiInfo[] = guild.emojis.cache.map((emoji: GuildEmoji) => ({
-                emoji: emoji.toString(),
-                name: emoji.name,
-                description: `Custom server emoji${emoji.animated ? ' (animated)' : ''}`
-            }));
-
-            // --- Get Standard Unicode Emojis ---
-            const standardEmojis: EmojiInfo[] = emojiDictionary.unicode.map((unicodeChar: string) => {
-                const name = emojiDictionary.getName(unicodeChar) || 'Unknown Unicode Emoji';
-                return {
-                    emoji: unicodeChar,
-                    name: name,
-                    description: 'Standard Unicode Emoji'
-                };
-            });
-
-            // --- Combine, Cache, and Return ---
-            const allEmojis = [...customEmojis, ...standardEmojis];
-            logger.debug(`Fetched and cached ${customEmojis.length} custom and ${standardEmojis.length} standard emojis.`);
-
-            // Update cache
-            DiscordClientV2.emojiCache = allEmojis;
-            DiscordClientV2.emojiCacheExpiry = Date.now() + DiscordClientV2.EMOJI_CACHE_TTL;
-
-            return allEmojis;
-
-        } catch (err) {
-            logger.error({ attempt: attempts + 1, err }, `Failed attempt for getAvailableEmojis`);
-            if (attempts < 2) { // Retry up to 3 times total
-                await delay(100 * (attempts + 1));
-                // Don't return from cache on retry, force refetch
-                return DiscordClientV2.getAvailableEmojis(channelId, attempts + 1);
-            } else {
-                logger.error(`Final attempt failed for getAvailableEmojis`);
-                // Clear potentially stale cache on final failure
-                DiscordClientV2.emojiCache = null;
-                DiscordClientV2.emojiCacheExpiry = null;
-                throw err; // Re-throw the error after final attempt
             }
         }
     }

@@ -35,18 +35,10 @@ export const ResetConversation: Command = {
             logger.info('Chat was active, sending reset message.');
             // Use DiscordClientV2.startTyping/stopTyping and ChatbotV2 handler
             try {
-                await DiscordClientV2.startTyping(channelId);
                 // Send message through the chatbot handler to ensure it's added to the (now empty) history
                 await ChatbotV2.handleIncomingDiscordMessage(channelId, _client.user.id, "My recent memory has just been wiped! Dazed and confused, I say:");
-                // Assuming stopTyping is handled within handleIncomingDiscordMessage or ChatbotV2 itself
             } catch (error) {
                 logger.error({ err: error }, "Failed to send reset confirmation message via Chatbot.");
-                // Attempt to stop typing even on error, wrap in try/catch
-                try {
-                    DiscordClientV2.stopTyping(channelId);
-                } catch (stopError) {
-                     logger.warn({err: stopError}, "Failed to stop typing after error during reset message sending.");
-                }
             }
         } else {
              logger.info('Chat was not active, no reset message sent.');
