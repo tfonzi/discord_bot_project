@@ -29,7 +29,7 @@ export const Teach: Command = {
         });
 
         const memory: string = (interaction.options.get("memory")!.value! as string).trim();
-        const indexName = interaction.guildId; // Using guildId as index name, as per original logic
+        const indexName = `channel:${interaction.channelId}`;
 
         if (!indexName) {
             logger.error('Missing guildId, cannot determine memory index.');

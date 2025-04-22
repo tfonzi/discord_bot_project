@@ -15,7 +15,7 @@ let logger: PinoLogger | undefined = undefined;
 
 (async () => {
     try {
-        let logLevel: "DEBUG" | "INFO" | "VERBOSE" = "INFO";
+        let logLevel: "DEBUG" | "INFO" | "VERBOSE" | "TRACE" = "INFO";
         if (process.env.LOG_LEVEL && isLogLevel(process.env.LOG_LEVEL)) {
             logLevel = process.env.LOG_LEVEL;
         } else {

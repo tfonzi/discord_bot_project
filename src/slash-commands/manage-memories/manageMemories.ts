@@ -21,7 +21,7 @@ export const ManageMemories: Command = {
         });
 
         logger.info("Memory management command started.");
-        const indexName = interaction.guildId;
+        const indexName = `channel:${interaction.channelId}`;
 
         if (!indexName) {
             logger.error('Missing guildId, cannot manage memories.');

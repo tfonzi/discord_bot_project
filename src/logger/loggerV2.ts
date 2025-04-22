@@ -2,18 +2,19 @@ import pino, { Logger as PinoLogger, DestinationStream, Bindings } from 'pino';
 
 const FILE_PATH = "./logs/bot.log";
 
-// Log levels compatible with the previous setup
-type LogLevel = "DEBUG" | "INFO" | "VERBOSE";
+// Log levels compatible with the previous setup + TRACE
+type LogLevel = "DEBUG" | "INFO" | "VERBOSE" | "TRACE";
 
 export function isLogLevel(a: string): a is LogLevel {
-    return ["DEBUG", "INFO", "VERBOSE"].includes(a);
+    return ["DEBUG", "INFO", "VERBOSE", "TRACE"].includes(a);
 }
 
 // Map our levels to Pino levels
 const levelMapping: { [key in LogLevel]: string } = {
     VERBOSE: 'trace',
     DEBUG: 'debug',
-    INFO: 'info'
+    INFO: 'info',
+    TRACE: 'trace' // Add TRACE mapping
 };
 
 export class LoggerV2 {

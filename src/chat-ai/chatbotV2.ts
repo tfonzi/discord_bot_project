@@ -19,8 +19,9 @@ const COLLECT_TIMER = 5000; // 5 seconds
 const HISTORY_CHAR_LIMIT = 10000; // Max characters for history context
 const DECISION_MODEL = "o4-mini"; // Model for decision logic
 const GENERATION_MODEL = "gpt-4o"; // More powerful model for text/prompt generation
-const EMBEDDING_MODEL = "text-embedding-3-small"; // Or make configurable
+const EMBEDDING_MODEL = "text-embedding-ada-002"; // Or make configurable
 const IMAGE_GENERATION_MODEL = "dall-e-3"; // Or make configurable
+const MEMORY_SEARCH_COUNT = 10; // NEW: How many memories to retrieve
 
 // --- Interfaces & Types ---
 
@@ -77,6 +78,29 @@ const DECISION_TOOL_SCHEMA: OpenAI.ChatCompletionTool = {
                 }
             },
             required: ["shouldRespond", "shouldGenerateImage", "emojiReactions"]
+        }
+    }
+};
+
+// NEW: Define the schema for memory extraction
+const MEMORY_EXTRACTION_TOOL_SCHEMA: OpenAI.ChatCompletionTool = {
+    type: "function",
+    function: {
+        name: "extract_conversation_memories",
+        description: "Extracts key memories, personal details, relationship dynamics, and personality insights from the conversation history.",
+        parameters: {
+            type: "object",
+            properties: {
+                memories: {
+                    type: "array",
+                    description: "An array of strings, where each string is a concise (1-3 sentences) memory or insight extracted from the conversation. Focus on personal details, relationships, user personalities, or important facts mentioned.",
+                    items: {
+                        type: "string",
+                        description: "A single, concise memory or insight (1-3 sentences)."
+                    }
+                }
+            },
+            required: ["memories"]
         }
     }
 };
@@ -370,21 +394,42 @@ export class ChatbotV2 {
     // State
     private openai: OpenAI | undefined;
     private systemPromptText: string = "You are a helpful assistant."; // Default prompt for generating the main text response
-    private additionalSystemPromptText: string = "All previous messages in the chat are provided with the following format: \"User: Message\", including your own. In your response, you must not include the user prefix. In addition, you will be talking with several participants at once. You will have context about each message and who said it. This should factor into what you say. While the output of this chat cannot directly produce images, there is a seperate process for creating images. You will be provided the output of this process, labeled as DECISION_OUTPUT, so you will know if image generation is planned with your response. This DECISION_OUTPUT should not be directly used in your response, but it should be used to inform your response. You also know if you had reacted to specific messages with emojis. Specific messages are dictated by their MessageID."; // Additional context for the chatbot
+    private additionalSystemPromptText: string = "All previous messages in the chat are provided with the following format: \"User: Message\", including your own. In your response, you must not include the user prefix. In addition, you will be talking with several participants at once. You will have context about each message and who said it. This should factor into what you say. If you are asked to generate an image or decide to generate one, act as if you are creating the image yourself."; // UPDATED context for the chatbot
     private reasoningPromptText: string = "You are an AI assistant responsible for analyzing conversation context and deciding the next steps. Your goal is to determine if a text response is needed, if an image should be generated, and what emoji reactions are appropriate based on the provided message history. The history includes messages with 'MessageID', 'User', 'Text', and potentially 'Images'. You MUST use the 'make_response_decision' tool to output your decisions in the specified JSON format. Focus solely on the decision logic; do not generate response text yourself. Consider the flow of conversation, user requests, and overall engagement when making decisions. Use an empty array [] for emojiReactions if none are suitable. You can react at your own discretion, but you should probably react only around 30% of the time, since reacting to every message would be overwhelming."; // Default prompt for o4-mini decision making
     private imageGenerationPromptText: string = "You are an expert AI assistant specializing in crafting concise, vivid, and effective prompts for the DALL-E 3 image generation model. Analyze the provided conversation history, paying close attention to the most recent messages and the assistant's latest text response (if available). Generate a single, stand-alone image prompt that accurately reflects the user's request or the conversational context. You should take into account prior descriptions and all details. Output ONLY the prompt text itself, with no additional commentary, quotes, or explanations."; // Default prompt for generating DALL-E prompts
     private additionalImageGenerationPromptText: string = " All images must be either in the style of something hand-drawn or painted. All drawings should be amateur level and reflect a rough painting or sketch."; // Additional prompt for generating DALL-E prompts
-    // NEW: Prompt for extracting memories upon chat inactivity
-    private memoryExtractionPromptText: string = "You are an AI assistant tasked with analyzing a completed conversation history and summarizing the key takeaways for each participant. Review the entire chat log provided, which includes messages from multiple participants ('User: Name Text...') and the assistant's own messages. Please ignore assistant messages when summarizing. The format of the output should be as follows: 'Participant Name, Key Takeaway 1, Key Takeaway 2, Key Takeaway 3, etc., Personality Traits, Impression'. Do not output conversational text, just the summary.";
+    // UPDATED: Prompt for extracting memories using a tool
+    private memoryExtractionPromptText: string = `You are an AI assistant specializing in analyzing multi-participant conversations to extract meaningful memories and insights. Review the entire chat log provided, which includes messages formatted like 'User: Name Text...' and the assistant's own messages (which you should generally ignore unless they provide crucial context about user reactions or information). Your goal is to identify and summarize key takeaways about the participants.
+
+Focus on:
+- **Personal Details:** Facts revealed about individuals (e.g., hobbies, preferences, work, life events).
+- **Relationships & Dynamics:** How participants interact with each other (e.g., agreements, disagreements, support, inside jokes).
+- **Personality & Vibe:** Consistent traits, communication styles, or attitudes displayed by participants.
+- **Important Facts/Topics:** Key information or recurring themes discussed in the conversation.
+
+Formulate each distinct memory or insight as a concise string, ideally 1-3 sentences long.
+
+**IMPORTANT CONTEXT:** You will be given a list of EXISTING memories previously stored for this conversation. You will ALSO be given the LATEST segment of the conversation transcript. 
+Your task is to ANALYZE THE LATEST TRANSCRIPT segment and identify ONLY the NEW insights, facts, or significantly UPDATED details that are NOT already captured adequately in the EXISTING memories. 
+- DO NOT simply repeat memories from the existing list.
+- If the new transcript segment contains information that refines or significantly adds to an existing memory, formulate an UPDATED memory string. It is important that total information is not lost if an existing memory is updated.
+- If the new transcript reveals entirely new facts or insights, formulate a NEW memory string.
+- Keep all output memories concise (1-3 sentences).
+
+Output ONLY the NEW or UPDATED memory strings derived from the LATEST transcript segment.
+
+You MUST use the 'extract_conversation_memories' tool to return these memories. The output should ONLY be the tool call containing an array of the NEW/UPDATED memory strings. Do not provide any other conversational text or explanation. If no new or updated memories are found based on the latest transcript, call the tool with an empty array [].`;
     private username: string = "ChatBot";
     private messageHistories: Map<string, MessageHistoryV2> = new Map();
     private messageProcessors: Map<string, MessageProcessorV2> = new Map();
     private activeChats: Map<string, boolean> = new Map(); // Track active state per channel
     private activeChatTimers: Map<string, NodeJS.Timeout> = new Map(); // Inactivity timers
+    private activeSessionStartIndex: Map<string, number> = new Map();
     private logger: PinoLogger;
 
     // Constants for chat state management (can be adjusted)
     private static readonly INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+
 
     // Private constructor for singleton pattern
     private constructor() {
@@ -396,8 +441,7 @@ export class ChatbotV2 {
     // --- Singleton Access and Initialization ---
 
     /**
-     * Initializes the Chatbot singleton with necessary configurations.
-     * Must be called once before using other methods.
+     * Initializes the Chatbot singleton. Assumes Redis client is initialized elsewhere.
      * @param apiKey OpenAI API Key.
      * @param systemPrompt The base system prompt for the chatbot.
      * @param botUsername The name the bot should use.
@@ -514,12 +558,15 @@ export class ChatbotV2 {
             
             // Construct the user message content for the API call from the batch
             const userMessages: ChatCompletionMessageParam[] = [];
+            let batchTextContent = ""; // NEW: Accumulate text for memory search query
             messageBatch.forEach(msg => {
                 const part: OpenAI.ChatCompletionContentPart[] = [];
                 // Add text part if present
                 if (msg.text) {
                     // For simplicity now, just adding the text directly.
-                    part.push({ type: "text", text: `MessageID: ${msg.messageId}, User: ${msg.user} Text: ${msg.text}` });
+                    const formattedText = `MessageID: ${msg.messageId}, User: ${msg.user} Text: ${msg.text}`; // Keep original format for API
+                    part.push({ type: "text", text: formattedText });
+                    batchTextContent += `${msg.user}: ${msg.text}\n`; // Accumulate simpler format for query
                 }
                 // Add image parts if present
                 if (msg.imageUrls) {
@@ -536,6 +583,7 @@ export class ChatbotV2 {
                     userMessages.push({ role: "user", content: part });
                 }
             });
+            batchTextContent = batchTextContent.trim(); // Clean up accumulated text
 
             // Ensure there's at least one part to send, otherwise, OpenAI might error
             if (userMessages.length === 0) {
@@ -552,12 +600,19 @@ export class ChatbotV2 {
 
             // --- 3. Add User Message(s) Representation to History --- 
             messageBatch.forEach(msg => {
-                if (msg.text) {
-                     history.addMessage(msg);
-                }
+                 // Add representation to history (text/image).
+                 // Assistant responses added later.
+                 history.addMessage(msg);
             });
 
-            // --- 4. Get Decision Logic from o4-mini ---
+            // --- 4. Start Typing Indicator ---
+            try {
+                await DiscordClientV2.startTyping(channelId);
+            } catch (typingError) {
+                logger.error({ err: typingError }, "Error starting typing indicator in handleMessageBatch");
+            }
+
+            // --- 5. Get Decision Logic from o4-mini ---
             let decision: DecisionResponse | null = null;
             let decisionErrorOccurred = false;
             try {
@@ -580,11 +635,11 @@ export class ChatbotV2 {
                 } catch { /* Ignore */ }
             }
 
-            // --- 5. Process Decision ---
+            // --- 6. Process Decision ---
             if (decision && !decisionErrorOccurred) {
                 logger.info({ decision }, 'Received decision from API');
 
-                // --- 5a. Handle Emoji Reactions (Immediately) ---
+                // --- 6a. Handle Emoji Reactions (Immediately) ---
                 if (decision.emojiReactions && decision.emojiReactions.length > 0) {
                     logger.info({ reactions: decision.emojiReactions }, 'Attempting emoji reactions.');
                     for (const reactionItem of decision.emojiReactions) {
@@ -613,21 +668,69 @@ export class ChatbotV2 {
                 let imagePrompt: string | null = null;
                 let imageUrl: string | null = null;
 
-                // --- 5b. Generate Text Response (if needed) ---
+                // --- 6b. Generate Text Response (if needed) ---
                 if (decision.shouldRespond) {
                     logger.info('Decision includes generating a text response.');
-                    try {
-                        await DiscordClientV2.startTyping(channelId);
-                    } catch (typingError) {
-                        logger.error({ err: typingError }, "Error starting typing indicator in handleMessageBatch");
+                    // >>> MEMORY RETRIEVAL START <<<
+                    let relevantMemories: string[] = [];
+                    if (batchTextContent) { // Only search if there's text context from the batch
+                        try {
+                             logger.debug({ channelId, queryTextLength: batchTextContent.length }, "Attempting to retrieve relevant memories");
+                             const queryEmbedding = await ChatbotV2.createEmbedding(batchTextContent);
+                             if (queryEmbedding) {
+                                 // Directly use the static method
+                                 const indexName = `channel:${channelId}`; // Define index name
+                                 const searchResults = await RedisEmbeddingServiceV2.PerformVectorSimilarity(
+                                     indexName,
+                                     queryEmbedding,
+                                     MEMORY_SEARCH_COUNT
+                                 );
+                                 // Use 'result' field from VectorSimilarityResult which holds the text
+                                 relevantMemories = searchResults.map(result => result.result).filter((text): text is string => !!text).map(text => text.replaceAll(`noderedis:${indexName}:`, ""));
+                                 if (relevantMemories.length > 0) {
+                                      logger.info({ count: relevantMemories.length }, "Retrieved relevant memories");
+                                 } else {
+                                      logger.debug("No relevant memories found in Redis.");
+                                 }
+                             } else {
+                                 logger.warn("Failed to create embedding for memory search query.");
+                             }
+                        } catch (redisError: any) {
+                             // Check if the error indicates the index doesn't exist yet
+                             const indexName = `channel:${channelId}`; // Define here too for logging
+                             if (redisError.message && redisError.message.includes('no such index')) {
+                                  logger.warn({ index: `idx:${indexName}` }, "Memory index does not exist yet for this channel. Skipping memory retrieval.");
+                             } else {
+                                  logger.error({ err: redisError, indexName }, "Error during memory retrieval from Redis.");
+                                  // Don't block response generation due to memory error
+                             }
+                        }
+                    } else {
+                         logger.debug("No batch text content, skipping memory retrieval.");
                     }
+                    // >>> MEMORY RETRIEVAL END <<<
                     try {
                         // Construct messages for text generation
                          const generationRequestMessages: ChatCompletionMessageParam[] = [
                              { role: "system", content: `${bot.systemPromptText} ${bot.additionalSystemPromptText}`}, // Use main system prompt
-                             ...history.getHistory(), // Get LATEST history, potentially including user messages just added
-                             { role: "assistant", content: `DECISION_OUTPUT: ${JSON.stringify(decision)}`}
                          ];
+
+                         // >>> MEMORY INJECTION START <<<
+                         if (relevantMemories.length > 0) {
+                              const memoryContext = "Relevant past memories for context: " + relevantMemories.join(" ");
+                              generationRequestMessages.push({ role: "system", content: memoryContext });
+                              logger.debug("Injecting retrieved memories into generation prompt.");
+                         }
+                         // >>> MEMORY INJECTION END <<<
+
+                         // Add latest history AFTER system prompts/memories
+                         generationRequestMessages.push(...history.getHistory());
+
+                         if (decision.shouldGenerateImage) {
+                            generationRequestMessages.push( 
+                                // NEW: Re-add and refine the decision context message
+                                { role: "system", content: `CONTEXT_INFO: You have decided to generate an image for the user (decision.shouldGenerateImage=${decision.shouldGenerateImage}). If true, weave this fact into your response naturally, pretending you are the one creating the image. Do not explicitly mention 'CONTEXT_INFO' or the decision process.` });
+                         }
                         assistantResponseText = await bot._generateResponseText(generationRequestMessages); // Pass full messages including system prompt
 
                         if (assistantResponseText) {
@@ -665,7 +768,7 @@ export class ChatbotV2 {
                     logger.info('Decision: No text response needed.');
                 }
 
-                // --- 5c. Generate Image (if needed) ---
+                // --- 6c. Generate Image (if needed) ---
                 if (decision.shouldGenerateImage) {
                     logger.info('Decision includes generating an image.');
                     try {
@@ -747,6 +850,7 @@ export class ChatbotV2 {
         };
         this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: messages.length, toolChoice: params.tool_choice }, `Requesting decision logic from ${DECISION_MODEL}`);
         try {
+            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${DECISION_MODEL} for decision logic`); // Add trace log
             const response = await this.openai.chat.completions.create(params);
             const toolCalls = response.choices[0]?.message?.tool_calls;
             if (toolCalls && toolCalls[0]?.function?.name === DECISION_TOOL_SCHEMA.function.name) {
@@ -816,6 +920,7 @@ export class ChatbotV2 {
          };
          this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: messages.length, temperature: params.temperature, max_tokens: params.max_tokens }, `Requesting text generation from ${GENERATION_MODEL}`);
          try {
+            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${GENERATION_MODEL} for text generation`); // Add trace log
             const response = await this.openai.chat.completions.create(params);
             const content = response.choices[0]?.message?.content;
             if (content) {
@@ -840,23 +945,27 @@ export class ChatbotV2 {
     // NEW: Method for generating an image prompt using 4o
     private async _generateImagePrompt(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<string | null> {
          if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
+         // Add the style instruction as a system message at the beginning
          const promptGenMessages: ChatCompletionMessageParam[] = [
-             { role: "system", content: this.imageGenerationPromptText }, 
+             { role: "system", content: this.imageGenerationPromptText },
+             { role: "system", content: `STYLE_CONSTRAINT: ${this.additionalImageGenerationPromptText}` }, // Add style constraint here
               ...messages
          ];
 
          const params: ChatCompletionCreateParams = {
              model: GENERATION_MODEL,
-             messages: promptGenMessages, // Use the array with the system prompt added
+             messages: promptGenMessages, // Use the array with the system prompts added
              temperature: 0.6, // Slightly lower temp for focused prompt?
              max_tokens: 300, // Prompts shouldn't be excessively long
          };
          this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: promptGenMessages.length, temperature: params.temperature, max_tokens: params.max_tokens }, `Requesting image prompt generation from ${GENERATION_MODEL}`);
          try {
+            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${GENERATION_MODEL} for image prompt generation`); // Add trace log
             const response = await this.openai.chat.completions.create(params);
             const prompt = response.choices[0]?.message?.content;
             if (prompt) {
-                const finalPrompt = prompt.concat(this.additionalImageGenerationPromptText).trim().replace(/^["']|["']$/g, "");
+                // Still concatenate at the end for DALL-E reinforcement
+                const finalPrompt = prompt.concat(" " + this.additionalImageGenerationPromptText).trim().replace(/^["']|["']$/g, "");
                 this.logger.info({ promptLength: finalPrompt.length, model: GENERATION_MODEL }, `Generated image prompt using ${GENERATION_MODEL}`);
                 // Clean up prompt (remove quotes, etc.) if necessary
                 return finalPrompt; // Remove leading/trailing quotes
@@ -904,6 +1013,7 @@ export class ChatbotV2 {
          const params = { model: EMBEDDING_MODEL, input: text };
          bot.logger.debug({ attempt: attempts + 1, model: params.model, textLength: text.length }, `Requesting embedding from ${EMBEDDING_MODEL}`);
          try {
+             bot.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${EMBEDDING_MODEL} for embedding`); // Add trace log
              const response = await bot.openai.embeddings.create(params);
              const embedding = response.data[0]?.embedding;
              if (embedding) {
@@ -940,6 +1050,7 @@ export class ChatbotV2 {
         };
         bot.logger.info({ model: params.model, prompt: params.prompt, n: params.n, size: params.size, attempt: attempts + 1 }, `Requesting image generation from ${IMAGE_GENERATION_MODEL}`);
         try {
+            bot.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${IMAGE_GENERATION_MODEL} for image generation`); // Add trace log
             const response = await bot.openai.images.generate(params);
             const imageUrl = response.data[0]?.url;
             if (imageUrl) {
@@ -980,23 +1091,82 @@ export class ChatbotV2 {
     }
 
     public static async setChatActiveState(channelId: string, state: boolean): Promise<void> {
+        const bot = ChatbotV2.getInstance(); // Get instance once
+        const currentState = bot.activeChats.get(channelId) ?? false;
+
         // If the state is already set to the desired state, do nothing
-        if (state === ChatbotV2.getChatActiveState(channelId)) {
+        if (state === currentState) {
             return;
         }
 
-        const bot = ChatbotV2.getInstance();
         bot.activeChats.set(channelId, state);
         bot.logger.info({ channelId, state }, 'Chat active state updated');
+
         if (!state) {
-            // Use static access
+            // --- Chat becoming INACTIVE ---
             ChatbotV2.clearChatTimer(channelId);
+
+            // Stop and remove the processor
             bot.messageProcessors.get(channelId)?.stop();
-            // Remove the processor instance when chat goes inactive
             bot.messageProcessors.delete(channelId);
             bot.logger.debug({ channelId }, 'Stopped and removed message processor due to inactivity.');
-            // Extract memories before setting inactive
-            await bot._extractAndLogConversationMemories(channelId)
+
+            // Start typing
+            await DiscordClientV2.startTyping(channelId);
+
+            // --- Generate and Post Goodbye Message via ChatbotV2 --- 
+            bot.logger.debug('Calling generateAndPostGoodbye...');
+            await ChatbotV2.generateAndPostGoodbye(channelId);
+            bot.logger.debug('generateAndPostGoodbye finished.');
+            // -----------------------------------------------------
+
+            await DiscordClientV2.postMessage(`*Rivanna leaves chat*`, channelId);
+
+            // Extract memories using messages from the session that just ended
+            try {
+                const historyInstance = bot.messageHistories.get(channelId);
+                if (historyInstance) {
+                    const startIndex = bot.activeSessionStartIndex.get(channelId) ?? 0;
+                    const conversationHistory = historyInstance.getHistory();
+                    const sessionMessages = conversationHistory.slice(startIndex);
+
+                    if (sessionMessages.length > 0) {
+                         bot.logger.info({ channelId, startIndex, sessionMessageCount: sessionMessages.length }, 'Extracting memories from last active session.');
+                         // Pass only the relevant session messages
+                         await bot._extractEmbedAndStoreMemories(channelId, sessionMessages);
+                    } else {
+                         bot.logger.info({ channelId, startIndex }, 'No new messages in the last active session to extract memories from.');
+                    }
+                } else {
+                    bot.logger.warn({ channelId }, 'Cannot extract memories for inactive chat, history instance not found.');
+                }
+            } catch (error) {
+                 bot.logger.error({ err: error, channelId }, 'Error during memory extraction on chat inactivity.');
+            } finally {
+                 // Clean up the start index tracker for this channel
+                 bot.activeSessionStartIndex.delete(channelId);
+            }
+        } else {
+             // --- Chat becoming ACTIVE ---
+             bot.logger.debug({ channelId }, 'Chat marked as active.');
+             // Record the current history length as the start index for this new session
+             const historyInstance = bot._getOrCreateHistory(channelId); // Ensure history exists
+             const startIndex = historyInstance.getHistory().length;
+             bot.activeSessionStartIndex.set(channelId, startIndex);
+             bot.logger.info({ channelId, startIndex }, 'Recorded start index for new active session.');
+
+             // NEW: Attempt to create/verify Redis index for memories on chat activation
+             const indexName = `channel:${channelId}`;
+             try {
+                 await RedisEmbeddingServiceV2.CreateIndexForEmbedding(indexName);
+                 // Log success only if it didn't already exist (handled inside CreateIndexForEmbedding)
+             } catch (error) {
+                 // Log warn, but don't prevent chat activation
+                 bot.logger.warn({ err: error, indexName });
+             }
+
+             // Ensure processor exists (it's created on first message if needed)
+             // Refresh timer happens on message receipt, not here.
         }
     }
 
@@ -1054,71 +1224,286 @@ export class ChatbotV2 {
         return responseText; // Return original if prefix not found
     }
 
-    // NEW: Method for generating a memory summary using the decision model
-    private async _generateMemorySummary(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<string | null> {
+    // UPDATED: Method for generating a memory summary using a tool, accepting the conversation script AND existing memories
+    private async _generateMemorySummary(conversationScript: string, existingMemories: string[], attempts: number = 0): Promise<string[] | null> {
         if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
+
+        // Construct messages for the API call
         const summaryMessages: ChatCompletionMessageParam[] = [
             { role: "system", content: this.memoryExtractionPromptText },
-            ...messages // Include the full history passed in
+            { role: "system", content: `Your name is ${ChatbotV2.getUsername()}.` }, // Simplified name context
         ];
 
+        // Add existing memories if available
+        if (existingMemories.length > 0) {
+            const existingMemoryContext = "EXISTING MEMORIES (for context, do not repeat):\n" + existingMemories.map(m => `- ${m}`).join("\n");
+            summaryMessages.push({ role: "system", content: existingMemoryContext });
+        }
+
+        // Add the new conversation script segment
+        summaryMessages.push({
+            role: "user",
+            content: `LATEST CONVERSATION TRANSCRIPT (analyze for new/updated memories):\n${conversationScript}`
+        });
+
         const params: ChatCompletionCreateParams = {
-            model: DECISION_MODEL, // Use the decision model for analysis as requested
+            model: DECISION_MODEL, // Use the decision model for analysis
             messages: summaryMessages,
-            max_completion_tokens: 25000,
-            reasoning_effort: "high"
+            tools: [MEMORY_EXTRACTION_TOOL_SCHEMA], // Use the new tool schema
+            tool_choice: { type: "function", function: { name: MEMORY_EXTRACTION_TOOL_SCHEMA.function.name } }, // Force the tool
         };
-        this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: summaryMessages.length }, `Requesting memory summary from ${DECISION_MODEL}`);
+        this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: summaryMessages.length, scriptLength: conversationScript.length, toolChoice: params.tool_choice }, `Requesting memory extraction via tool from ${DECISION_MODEL}`);
+
         try {
+            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${DECISION_MODEL} for memory extraction`); // Add trace log
             const response = await this.openai.chat.completions.create(params);
-            const content = response.choices[0]?.message?.content;
-            if (content) {
-                this.logger.info({ summaryLength: content.length, model: DECISION_MODEL }, `Generated memory summary using ${DECISION_MODEL}`);
-                return content.trim();
+            const toolCalls = response.choices[0]?.message?.tool_calls;
+
+            if (toolCalls && toolCalls[0]?.function?.name === MEMORY_EXTRACTION_TOOL_SCHEMA.function.name) {
+                const argsString = toolCalls[0].function.arguments;
+                this.logger.debug({ argsString }, 'Attempting to parse memory extraction tool arguments');
+                try {
+                    const args = JSON.parse(argsString) as { memories?: string[] }; // Expect { memories: ["...", "..."] }
+
+                    // Validate the response structure
+                    if (args && Array.isArray(args.memories) && args.memories.every(item => typeof item === 'string')) {
+                        this.logger.info({ memoryCount: args.memories.length, model: DECISION_MODEL }, `Successfully extracted memories using ${DECISION_MODEL} tool.`);
+                        return args.memories; // Return the array of memory strings
+                    } else {
+                        this.logger.error({ args }, 'Parsed memory extraction tool arguments are invalid or missing the "memories" array of strings.');
+                        throw new Error('Parsed memory extraction tool arguments invalid or missing required "memories" array.');
+                    }
+                } catch (parseError) {
+                    this.logger.error({ err: parseError, argsString }, 'Failed to parse memory extraction tool arguments JSON or validation failed');
+                    throw new Error(`Failed to parse/validate memory tool arguments: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+                }
             } else {
-                this.logger.warn({ model: DECISION_MODEL }, 'Memory summary generation response content was null or empty.');
-                return null;
+                this.logger.error({ responseMessage: response.choices[0]?.message }, `Response from ${DECISION_MODEL} did not contain the expected tool call '${MEMORY_EXTRACTION_TOOL_SCHEMA.function.name}' for memory extraction`);
+                throw new Error(`Response from ${DECISION_MODEL} did not use the expected memory extraction tool.`);
             }
         } catch (error) {
-            this.logger.error({ err: error, attempt: attempts + 1, model: DECISION_MODEL }, `Error during ${DECISION_MODEL} memory summary generation call`);
+            this.logger.error({ err: error, attempt: attempts + 1, model: DECISION_MODEL }, `Error during ${DECISION_MODEL} memory extraction tool call`);
             if (attempts < 1) { // Retry only once for this non-critical task?
                 await delay(300 * (attempts + 1));
-                return await this._generateMemorySummary(messages, attempts + 1);
+                // Pass the script string AND existing memories in the retry call
+                return await this._generateMemorySummary(conversationScript, existingMemories, attempts + 1);
             } else {
-                this.logger.error(`Final attempt failed for ${DECISION_MODEL} memory summary generation`);
+                this.logger.error(`Final attempt failed for ${DECISION_MODEL} memory extraction`);
                 // Don't throw, just return null as it's not critical for chat operation
                 return null;
             }
         }
     }
 
+    // RENAMED & UPDATED: Was _extractAndLogConversationMemories
+    // Now extracts, embeds, and stores NEW/UPDATED memories in Redis using static methods.
+    private async _extractEmbedAndStoreMemories(channelId: string, messagesToAnalyze: ChatCompletionMessageParam[]): Promise<void> {
+        const logger = this.logger.child({ channelId, action: 'extractEmbedStoreMemory' });
+        logger.info('Attempting to extract, embed, and store conversation memories.');
 
-    // NEW: Method to extract and log conversation memories
-    private async _extractAndLogConversationMemories(channelId: string): Promise<void> {
-        const logger = this.logger.child({ channelId, action: 'extractMemory' });
-        logger.info('Attempting to extract conversation memories upon inactivity.');
+        // Rely on RedisEmbeddingServiceV2 static methods to handle client availability.
 
-        try {
-            const history = this._getOrCreateHistory(channelId); // Should exist if chat was active
-            const conversationHistory = history.getHistory();
+        if (!messagesToAnalyze || messagesToAnalyze.length === 0) {
+            logger.info('No messages provided to analyze for memories.');
+            return;
+        }
 
-            if (conversationHistory.length === 0) {
-                logger.info('No conversation history found to analyze for memories.');
-                return;
+        // --- Transform messages into script string ---
+        let conversationScript = "";
+        const botUsername = ChatbotV2.getUsername(); // Get username once
+
+        for (const message of messagesToAnalyze) {
+            let line = "";
+            // Extract text content, handling different formats
+            let textContent = "";
+            if (typeof message.content === 'string') {
+                textContent = message.content;
+            } else if (Array.isArray(message.content)) {
+                // Find the first text part if content is an array
+                const textPart = message.content.find(part => part.type === 'text');
+                // Check the type before accessing .text
+                if (textPart && textPart.type === 'text') {
+                     textContent = textPart.text;
+                } else {
+                     textContent = ""; // Default if no text part found
+                }
             }
 
-            const memorySummary = await this._generateMemorySummary(conversationHistory);
+            if (message.role === 'assistant') {
+                // Prepend bot name to assistant messages
+                if (textContent) { // Only add if there's text
+                     line = `${botUsername}: ${textContent}`;
+                }
+            } else if (message.role === 'user') {
+                // Use user message content directly (assuming it's already formatted)
+                if (textContent) { // Only add if there's text
+                    line = textContent; // Should already be "User: Name Text..."
+                }
+            }
+            // Add other roles if necessary in the future
 
-            if (memorySummary) {
-                // For now, just log the summary. Could be stored elsewhere later.
-                logger.info({ memorySummary }, 'Successfully generated conversation memory summary.');
-                // TODO: Potentially store this summary associated with the channel or user IDs.
-            } else {
-                logger.warn('Failed to generate a memory summary for the conversation.');
+            if (line) { // Append the formatted line if it's not empty
+                 conversationScript += line + "\n";
+            }
+        }
+        conversationScript = conversationScript.trim(); // Remove trailing newline
+
+        if (!conversationScript) {
+             logger.warn("Failed to generate a non-empty conversation script from the messages.");
+             return;
+        }
+        // -----------------------------------------
+
+        try {
+            // NEW: 1. Get Existing Memories from Redis
+            const indexName = `channel:${channelId}`;
+            let existingMemories: string[] = [];
+            try {
+                // Assuming GetMemories returns { memory: string, redisKey: string }[]
+                // We only need the text content for the prompt
+                const memoryObjects = await RedisEmbeddingServiceV2.GetMemories(indexName);
+                existingMemories = memoryObjects.map(m => m.memory);
+                if (existingMemories.length > 0) {
+                     logger.info({ count: existingMemories.length }, "Retrieved existing memories for context.");
+                } else {
+                     logger.info("No existing memories found for this channel.");
+                }
+            } catch (redisError: any) {
+                // Log warning if index doesn't exist, error otherwise, but continue
+                if (redisError.message && redisError.message.includes('no such index')) {
+                    logger.warn({ index: `idx:${indexName}` }, "Memory index does not exist yet (when fetching existing memories).");
+                } else {
+                    logger.error({ err: redisError }, "Failed to retrieve existing memories from Redis. Proceeding without them.");
+                }
+                // Continue even if fetching fails, just won't have context
+            }
+
+            // Pass the generated script string AND existing memories to the summary generator
+            const newOrUpdatedMemoryArray = await this._generateMemorySummary(conversationScript, existingMemories);
+
+            // Process the NEW/UPDATED memories returned by the LLM
+            if (newOrUpdatedMemoryArray && newOrUpdatedMemoryArray.length > 0) {
+                logger.info({ newMemoryCount: newOrUpdatedMemoryArray.length }, 'Successfully extracted new/updated memories. Now embedding and storing...');
+
+                let storedCount = 0, embeddingErrors = 0, storageErrors = 0;
+
+
+                // 2. Embed and Store each NEW/UPDATED memory
+                for (const memoryText of newOrUpdatedMemoryArray) {
+                    if (!memoryText || memoryText.trim().length === 0) continue;
+                    try {
+                        const embedding = await ChatbotV2.createEmbedding(memoryText);
+                        if (embedding) {
+                            try {
+                                // Use the static method directly
+                                await RedisEmbeddingServiceV2.SetEmbeddingData(indexName, {
+                                    text: memoryText, // Use the actual memory text as key data
+                                    embedding: embedding
+                                });
+                                storedCount++;
+                                logger.trace({ memoryText: memoryText.substring(0, 50) + "..." }, "Stored memory in Redis.");
+                            } catch (storeError) {
+                                storageErrors++;
+                                logger.error({ err: storeError, memoryText: memoryText.substring(0, 50) + "..." }, "Failed to store memory vector in Redis.");
+                            }
+                        } else {
+                             embeddingErrors++;
+                             logger.warn({ memoryText: memoryText.substring(0, 50) + "..." }, "Failed to create embedding for memory, cannot store.");
+                        }
+                    } catch (embedError) {
+                         embeddingErrors++;
+                         logger.error({ err: embedError, memoryText: memoryText.substring(0, 50) + "..." }, "Error creating embedding for memory.");
+                    }
+                }
+                logger.info({ storedCount, embeddingErrors, storageErrors }, 'Finished processing extracted memories for storage.');
+
+            } else if (newOrUpdatedMemoryArray) { // Empty array is valid
+                 logger.info('No significant memories were extracted from the conversation script.');
             }
 
         } catch (error) {
             logger.error({ err: error }, 'Error occurred during memory extraction process.');
+        }
+    }
+
+    // NEW: Method for generating a goodbye message
+    private async _generateGoodbyeMessage(messages: ChatCompletionMessageParam[], attempts: number = 0): Promise<string | null> {
+         if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
+         if (!messages || messages.length === 0) {
+              this.logger.info("No messages provided to generate goodbye message, skipping.");
+              return null; // Cannot generate goodbye without context
+         }
+         const goodbyeMessages: ChatCompletionMessageParam[] = [
+            { role: "system", content: `${this.systemPromptText} ${this.additionalSystemPromptText}`},
+             ...messages, // Include the session history passed in,
+             { role: "system", content: `${this.username} will be leaving the chat. Please say goodbye to them.` }
+         ];
+
+         const params: ChatCompletionCreateParams = {
+            model: GENERATION_MODEL,
+            messages: goodbyeMessages,
+            temperature: 0.7,
+            max_tokens: 100, // Keep farewells short
+         };
+         this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: goodbyeMessages.length }, `Requesting goodbye message generation from ${GENERATION_MODEL}`);
+         try {
+            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${GENERATION_MODEL} for goodbye message`);
+            const response = await this.openai.chat.completions.create(params);
+            const content = response.choices[0]?.message?.content;
+            if (content) {
+                this.logger.info({ responseLength: content.length, model: GENERATION_MODEL }, `Generated goodbye message using ${GENERATION_MODEL}`);
+                // Normalize response to remove potential "Rivanna: " prefix if added by model
+                return this._normalizeAssistantResponse(content.trim(), this.username);
+            } else {
+                 this.logger.warn({ model: GENERATION_MODEL },'Goodbye message generation response content was null or empty.');
+                 return null;
+            }
+         } catch (error) {
+            this.logger.error({ err: error, attempt: attempts + 1, model: GENERATION_MODEL }, `Error during ${GENERATION_MODEL} goodbye message generation call`);
+            if (attempts < 1) { // Only retry once for farewell
+                await delay(300 * (attempts + 1));
+                return await this._generateGoodbyeMessage(messages, attempts + 1);
+            } else {
+                this.logger.error(`Final attempt failed for ${GENERATION_MODEL} goodbye message generation`);
+                return null; // Don't block ending the chat if goodbye fails
+            }
+         }
+    }
+
+    // NEW: Public static method to handle goodbye message generation and posting
+    public static async generateAndPostGoodbye(channelId: string): Promise<void> {
+        const bot = ChatbotV2.getInstance();
+        const logger = bot.logger.child({ channelId, action: 'generateAndPostGoodbye' });
+        logger.info("Attempting to generate and post goodbye message.");
+
+        try {
+            const historyInstance = bot.messageHistories.get(channelId);
+            let goodbyeText: string | null = null;
+
+            if (historyInstance) {
+                 const startIndex = bot.activeSessionStartIndex.get(channelId) ?? 0;
+                 const conversationHistory = historyInstance.getHistory();
+                 const sessionMessages = conversationHistory.slice(startIndex);
+                 logger.debug({ startIndex, sessionMessageCount: sessionMessages.length }, "Attempting to generate goodbye message based on session.");
+                 // Call the private method to generate the message
+                 goodbyeText = await bot._generateGoodbyeMessage(sessionMessages);
+            } else {
+                 logger.warn("Could not find history instance to generate goodbye message.");
+            }
+
+            if (goodbyeText) {
+                 try {
+                      logger.info("Posting generated goodbye message.");
+                      // Use the Discord client utility to post the message
+                      await DiscordClientV2.postMessage(goodbyeText, channelId);
+                 } catch (postError) {
+                      logger.error({ err: postError }, "Failed to post goodbye message.");
+                 }
+            } else {
+                 logger.info("No goodbye message was generated.");
+            }
+        } catch (error) {
+             logger.error({ err: error }, "Error during goodbye message generation/posting process.");
         }
     }
 } 

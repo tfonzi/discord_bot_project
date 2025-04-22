@@ -1,4 +1,4 @@
-import { ApplicationCommandType, Client, CommandInteraction, Message, TextChannel } from "discord.js";
+import { ApplicationCommandType, Client, CommandInteraction, Message, TextChannel, ApplicationCommandOptionType } from "discord.js";
 
 import { Command } from "./command";
 // V2 Imports
@@ -23,47 +23,45 @@ async function chatListenerV2(msg: Message<boolean>) {
         // Pass necessary info to the ChatbotV2 handler
         await ChatbotV2.handleIncomingDiscordMessage(msg.channelId, msg.id, msg.author.username, msg.content, imageUrls);
     } else {
-        // Optional: Log ignored messages
-        // logger.trace({ author: msg.author.tag, isBot: msg.author.bot, isActive: ChatbotV2.getChatActiveState(msg.channelId), startsWithSlash: msg.content.startsWith("/") }, "Ignoring message.");
+        logger.trace({ author: msg.author.tag, isBot: msg.author.bot, isActive: ChatbotV2.getChatActiveState(msg.channelId), startsWithSlash: msg.content.startsWith("/") }, "Ignoring message.");
     }
 };
 
 // Helper function to end a chat session
 async function endChatV2(client: Client, interaction: CommandInteraction) {
-    const logger = LoggerV2.getLogger().child({ 
-        component: 'ChatEndHelper', 
-        channelId: interaction.channelId, 
-        guildId: interaction.guildId, 
-        interactionId: interaction.id 
+    const logger = LoggerV2.getLogger().child({
+        component: 'ChatEndHelper',
+        channelId: interaction.channelId,
+        guildId: interaction.guildId,
+        interactionId: interaction.id
     });
 
     if (!ChatbotV2.getChatActiveState(interaction.channelId)) {
         logger.info(`Chat has already ended.`);
-        // Edit reply to inform user, as interaction was likely deferred
         await interaction.editReply({ content: "The chat session in this channel has already ended." }).catch(e => logger.error({err: e}, "Failed to edit reply for already ended chat."));
         return;
     }
 
+    logger.info('Ending chat session.');
+
     try {
-        logger.info('Ending chat session.');
-        // Indicate bot is leaving (response might be slightly delayed)
-        await interaction.editReply({ content: "*Rivanna prepares to leave...*" });
-        
-        // Send final message via ChatbotV2 (this might be simplified later)
-        // Instead of sending a message *through* the bot, just post directly.
-        // await ChatbotV2.handleIncomingDiscordMessage(interaction.channelId, client.user.id, "Rivanna has to leave and says goodbye!"); // This seems overly complex
-        
-        await DiscordClientV2.postMessage("*Rivanna leaves chat*", interaction.channelId);
-        
+        // Indicate bot is leaving *after* attempting to send goodbye
+        await interaction.editReply({ content: "*Rivanna prepares to leave*" });
+
     } catch (error) {
-        logger.error({err: error}, "Error during chat ending sequence.");
-        // Attempt to notify user even if cleanup fails partially
-        await interaction.editReply({ content: "There was an issue ending the chat session cleanly." }).catch(e => logger.error({err: e}, "Failed to edit reply for chat end error."));
+        logger.error({err: error}, "Error during chat ending sequence (goodbye call or reply edit).");
+        // Attempt to notify user, ensure reply is edited
+        try {
+             await interaction.editReply({ content: "There was an issue ending the chat session cleanly." });
+        } catch (replyError) {
+             logger.error({err: replyError}, "Failed to edit reply for chat end error.");
+        }
     } finally {
         // Always ensure state is cleaned up
         logger.debug('Clearing chat timer and setting state to inactive.');
-        ChatbotV2.clearChatTimer(interaction.channelId)
-        ChatbotV2.setChatActiveState(interaction.channelId, false);
+        ChatbotV2.clearChatTimer(interaction.channelId);
+        // Let setChatActiveState handle its own state map cleanup
+        await ChatbotV2.setChatActiveState(interaction.channelId, false); 
     }
 }
 
@@ -73,9 +71,17 @@ export const ChatStart: Command = {
     name: "start_chat",
     description: 'Start Chatting! Lasts 15 minutes of inactivity.',
     type: ApplicationCommandType.ChatInput,
+    options: [
+        {
+            name: "message",
+            description: "Optional first message to start the chat with.",
+            type: ApplicationCommandOptionType.String,
+            required: false
+        }
+    ],
     run: async (client: Client, interaction: CommandInteraction) => {
         const logger = LoggerV2.getLogger().child({ component: 'SlashCommand:ChatStart', channelId: interaction.channelId, interactionId: interaction.id });
-        
+
         if (ChatbotV2.getChatActiveState(interaction.channelId)) {
             logger.warn('Attempted to start chat in an already active channel.');
             await interaction.editReply({ content: "There is already an active chat session in this channel." });
@@ -83,26 +89,49 @@ export const ChatStart: Command = {
         }
 
         logger.info('Starting new chat session.');
-        
-        // Check if this is the first active chat - remains complex without global state check
-        // const needsListener = !ChatbotV2.isAnyChatActive(); // Hypothetical
-        // if (needsListener) {
-        //     logger.info("Attaching messageCreate listener as this seems to be the first active chat.");
-        //     client.on(`messageCreate`, chatListenerV2);
-        // } 
-        // WORKAROUND: Assume listener should always be on for now if not using global state properly
-        // Ensure listener is attached (might attach multiple times if not careful)
-        // A better approach is a persistent listener in index.ts
+
+        // WORKAROUND: Listener management (Consider moving to index.ts for persistent listener)
         client.removeListener('messageCreate', chatListenerV2); // Remove previous if any
         client.on(`messageCreate`, chatListenerV2); // Add listener
 
         ChatbotV2.setChatActiveState(interaction.channelId, true);
         ChatbotV2.refreshChatTimer(interaction.channelId); // Refresh starts the timer
-        
-        await interaction.editReply({ content: `*Rivanna enters chat*` });
-        
-        // Send initial greeting via Chatbot
-        await ChatbotV2.handleIncomingDiscordMessage(interaction.channelId, "", interaction.user.username, `${interaction.user.username} started the chat! Rivanna walks in and greets the room:`);
+
+        // Determine the initial message content
+        let initialMessageText: string;
+        let userMessage: string | null = null;
+        // Type guard to safely access options
+        if (interaction.isChatInputCommand()) {
+             userMessage = interaction.options.getString("message"); // Get the optional message
+             if (userMessage) {
+                  initialMessageText = userMessage; // Use user's message if provided
+                  logger.info({ userMessage }, 'User provided initial message with /start_chat command.');
+             } else {
+                  // Use default message if option not provided
+                  initialMessageText = `${interaction.user.username} started the chat! Rivanna walks in and greets the room:`;
+                  logger.info('No initial message provided, using default start message.');
+             }
+        } else {
+             // Fallback for safety, though should not happen for ChatInput type
+             initialMessageText = `${interaction.user.username} started the chat! Rivanna walks in and greets the room:`;
+             logger.warn('Interaction was not ChatInputCommandInteraction, using default start message.');
+        }
+
+        // Send the determined initial message via Chatbot
+        // Using interaction.id as a placeholder message ID, replace if a better ID source exists
+        await ChatbotV2.handleIncomingDiscordMessage(
+             interaction.channelId,
+             interaction.id, // Placeholder Message ID
+             interaction.user.username,
+             initialMessageText // Use the determined text
+        );
+
+        // Update the deferred reply to confirm chat start
+        if (userMessage) {
+            await interaction.editReply({ content: `*Rivanna enters chat* (${interaction.user.username}: "${userMessage}")` });
+        } else {
+            await interaction.editReply({ content: `*Rivanna enters chat*` });
+        }
     }
 }
 
