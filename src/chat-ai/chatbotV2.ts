@@ -15,7 +15,8 @@ import { Logger as PinoLogger } from 'pino';
 import { delay } from "../utils/utils";
 
 // --- Constants --- (Can be moved or made configurable)
-const COLLECT_TIMER = 5000; // 5 seconds
+const COLLECT_TIMER = 7000; // 7 seconds
+const COLLECT_TIMER_REFRESH_INTERVAL = 4000; // 4 second
 const HISTORY_CHAR_LIMIT = 10000; // Max characters for history context
 const DECISION_MODEL = "o4-mini"; // Model for decision logic
 const GENERATION_MODEL = "gpt-4o"; // More powerful model for text/prompt generation
@@ -279,10 +280,16 @@ class MessageProcessorV2 {
             this.startCollecting();
         } else {
             this.logger.debug('Collecting already in progress, refreshing timer');
-            if (this.collectingTimer) { // Ensure timer exists before refreshing
-               this.collectingTimer.refresh();
+            // Clear any potentially existing timer (safety measure)
+            if (this.collectingTimer) {
+                clearTimeout(this.collectingTimer);
             }
-        }
+
+            this.collectingTimer = setTimeout(async () => {
+                this.logger.debug('Collection timer finished');
+                await this.processResponseBasket();
+            }, COLLECT_TIMER_REFRESH_INTERVAL);
+            }
     }
 
     /**
@@ -1416,7 +1423,7 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
                     }
                 }
                 logger.info({ storedCount, embeddingErrors, storageErrors }, 'Finished processing extracted memories for storage.');
-
+                await DiscordClientV2.postMessage(`Rivanna will remember this. 🦋`, channelId);
             } else if (newOrUpdatedMemoryArray) { // Empty array is valid
                  logger.info('No significant memories were extracted from the conversation script.');
             }
