@@ -36,7 +36,7 @@ export const ResetConversation: Command = {
             // Use DiscordClientV2.startTyping/stopTyping and ChatbotV2 handler
             try {
                 // Send message through the chatbot handler to ensure it's added to the (now empty) history
-                await ChatbotV2.handleIncomingDiscordMessage(channelId, _client.user.id, "My recent memory has just been wiped! Dazed and confused, I say:");
+                await ChatbotV2.handleIncomingDiscordMessage(channelId, "", ChatbotV2.getUsername(), "My recent memory has just been wiped! Dazed and confused, I say:");
             } catch (error) {
                 logger.error({ err: error }, "Failed to send reset confirmation message via Chatbot.");
             }
