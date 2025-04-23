@@ -45,6 +45,15 @@ data "aws_iam_policy_document" "ec2_policy" {
 
   statement {
     actions = [
+      "s3:ListBucket"
+    ]
+    resources = [
+      "arn:aws:s3:::${var.s3_bucket_name}"
+    ]
+  }
+
+  statement {
+    actions = [
       "cloudwatch:PutMetricData"
     ]
     resources = ["*"] # Required for CloudWatch agent custom metrics

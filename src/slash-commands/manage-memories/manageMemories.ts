@@ -33,7 +33,7 @@ export const ManageMemories: Command = {
         logger.debug({ memoryCount: memories.length }, `Initial memories fetched.`);
         
         if (memories.length === 0) {
-            logger.info('No memories found for this guild.');
+            logger.info(`No memories found for this index: ${indexName}.`);
             await interaction.editReply({
                 content: "There are no memories currently! Please create one with the /teach command."
             });

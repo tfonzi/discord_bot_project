@@ -19,9 +19,10 @@ const COLLECT_TIMER = 7000; // 7 seconds
 const COLLECT_TIMER_REFRESH_INTERVAL = 5000; // 5 second
 const HISTORY_CHAR_LIMIT = 10000; // Max characters for history context
 const DECISION_MODEL = "o4-mini"; // Model for decision logic
+const DECISION_MODEL_2 = "o3"
 const GENERATION_MODEL = "gpt-4o"; // More powerful model for text/prompt generation
 const EMBEDDING_MODEL = "text-embedding-ada-002"; // Or make configurable
-const IMAGE_GENERATION_MODEL = "dall-e-3"; // Or make configurable
+const IMAGE_GENERATION_MODEL = "gpt-image-1"; // Or make configurable
 const MEMORY_SEARCH_COUNT = 10; // NEW: How many memories to retrieve
 
 // --- Interfaces & Types ---
@@ -406,7 +407,7 @@ export class ChatbotV2 {
     private imageGenerationPromptText: string = "You are an expert AI assistant specializing in crafting concise, vivid, and effective prompts for the DALL-E 3 image generation model. Analyze the provided conversation history, paying close attention to the most recent messages and the assistant's latest text response (if available). Generate a single, stand-alone image prompt that accurately reflects the user's request or the conversational context. You should take into account prior descriptions and all details. Output ONLY the prompt text itself, with no additional commentary, quotes, or explanations."; // Default prompt for generating DALL-E prompts
     private additionalImageGenerationPromptText: string = " All images must be either in the style of something hand-drawn or painted. All drawings should be amateur level and reflect a rough painting or sketch."; // Additional prompt for generating DALL-E prompts
     // UPDATED: Prompt for extracting memories using a tool
-    private memoryExtractionPromptText: string = `You are an AI assistant specializing in analyzing multi-participant conversations to extract meaningful memories and insights. Review the entire chat log provided, which includes messages formatted like 'User: Name Text...' and the assistant's own messages (which you should generally ignore unless they provide crucial context about user reactions or information). Your goal is to identify and summarize key takeaways about the participants.
+    private memoryExtractionPromptText: string = `You are an AI assistant specializing in analyzing multi-participant conversations to extract meaningful memories and insights. Review the entire chat log provided, which includes messages formatted like 'User: Name Text...' and the assistant's own messages (which you should generally ignore unless they provide crucial context about user reactions or information). Your goal is to identify and summarize key takeaways about the participants. You are an assistant and participant in the conversation. However, please refrain from making memories about yourself, unless they are significant to one of the other participants.
 
 Focus on:
 - **Personal Details:** Facts revealed about individuals (e.g., hobbies, preferences, work, life events).
@@ -1238,7 +1239,7 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
         // Construct messages for the API call
         const summaryMessages: ChatCompletionMessageParam[] = [
             { role: "system", content: this.memoryExtractionPromptText },
-            { role: "system", content: `Your name is ${ChatbotV2.getUsername()}.` }, // Simplified name context
+            { role: "system", content: `Reminder: You are an assistant and your name is ${ChatbotV2.getUsername()}.` }, // Simplified name context
         ];
 
         // Add existing memories if available
@@ -1254,15 +1255,15 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
         });
 
         const params: ChatCompletionCreateParams = {
-            model: DECISION_MODEL, // Use the decision model for analysis
+            model: DECISION_MODEL_2, // Use the decision model for analysis
             messages: summaryMessages,
             tools: [MEMORY_EXTRACTION_TOOL_SCHEMA], // Use the new tool schema
             tool_choice: { type: "function", function: { name: MEMORY_EXTRACTION_TOOL_SCHEMA.function.name } }, // Force the tool
         };
-        this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: summaryMessages.length, scriptLength: conversationScript.length, toolChoice: params.tool_choice }, `Requesting memory extraction via tool from ${DECISION_MODEL}`);
+        this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: summaryMessages.length, scriptLength: conversationScript.length, toolChoice: params.tool_choice }, `Requesting memory extraction via tool from ${DECISION_MODEL_2}`);
 
         try {
-            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${DECISION_MODEL} for memory extraction`); // Add trace log
+            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${DECISION_MODEL_2} for memory extraction`); // Add trace log
             const response = await this.openai.chat.completions.create(params);
             const toolCalls = response.choices[0]?.message?.tool_calls;
 
@@ -1274,7 +1275,7 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
 
                     // Validate the response structure
                     if (args && Array.isArray(args.memories) && args.memories.every(item => typeof item === 'string')) {
-                        this.logger.info({ memoryCount: args.memories.length, model: DECISION_MODEL }, `Successfully extracted memories using ${DECISION_MODEL} tool.`);
+                        this.logger.info({ memoryCount: args.memories.length, model: DECISION_MODEL_2 }, `Successfully extracted memories using ${DECISION_MODEL_2} tool.`);
                         return args.memories; // Return the array of memory strings
                     } else {
                         this.logger.error({ args }, 'Parsed memory extraction tool arguments are invalid or missing the "memories" array of strings.');
@@ -1285,17 +1286,17 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
                     throw new Error(`Failed to parse/validate memory tool arguments: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
                 }
             } else {
-                this.logger.error({ responseMessage: response.choices[0]?.message }, `Response from ${DECISION_MODEL} did not contain the expected tool call '${MEMORY_EXTRACTION_TOOL_SCHEMA.function.name}' for memory extraction`);
-                throw new Error(`Response from ${DECISION_MODEL} did not use the expected memory extraction tool.`);
+                this.logger.error({ responseMessage: response.choices[0]?.message }, `Response from ${DECISION_MODEL_2} did not contain the expected tool call '${MEMORY_EXTRACTION_TOOL_SCHEMA.function.name}' for memory extraction`);
+                throw new Error(`Response from ${DECISION_MODEL_2} did not use the expected memory extraction tool.`);
             }
         } catch (error) {
-            this.logger.error({ err: error, attempt: attempts + 1, model: DECISION_MODEL }, `Error during ${DECISION_MODEL} memory extraction tool call`);
+            this.logger.error({ err: error, attempt: attempts + 1, model: DECISION_MODEL_2 }, `Error during ${DECISION_MODEL_2} memory extraction tool call`);
             if (attempts < 1) { // Retry only once for this non-critical task?
                 await delay(300 * (attempts + 1));
                 // Pass the script string AND existing memories in the retry call
                 return await this._generateMemorySummary(conversationScript, existingMemories, attempts + 1);
             } else {
-                this.logger.error(`Final attempt failed for ${DECISION_MODEL} memory extraction`);
+                this.logger.error(`Final attempt failed for ${DECISION_MODEL_2} memory extraction`);
                 // Don't throw, just return null as it's not critical for chat operation
                 return null;
             }
