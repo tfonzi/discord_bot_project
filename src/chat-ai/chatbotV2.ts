@@ -16,7 +16,7 @@ import { delay } from "../utils/utils";
 
 // --- Constants --- (Can be moved or made configurable)
 const COLLECT_TIMER = 7000; // 7 seconds
-const COLLECT_TIMER_REFRESH_INTERVAL = 4000; // 4 second
+const COLLECT_TIMER_REFRESH_INTERVAL = 5000; // 5 second
 const HISTORY_CHAR_LIMIT = 10000; // Max characters for history context
 const DECISION_MODEL = "o4-mini"; // Model for decision logic
 const GENERATION_MODEL = "gpt-4o"; // More powerful model for text/prompt generation
@@ -1423,7 +1423,7 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
                     }
                 }
                 logger.info({ storedCount, embeddingErrors, storageErrors }, 'Finished processing extracted memories for storage.');
-                await DiscordClientV2.postMessage(`Rivanna will remember this. 🦋`, channelId);
+                await DiscordClientV2.postMessage(`*Rivanna will remember this.* 🦋`, channelId);
             } else if (newOrUpdatedMemoryArray) { // Empty array is valid
                  logger.info('No significant memories were extracted from the conversation script.');
             }
@@ -1477,6 +1477,46 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
          }
     }
 
+    // NEW: Method for generating an "amnesia" message
+    private async _generateForgetMessage(attempts: number = 0): Promise<string | null> {
+         if (!this.openai) throw new Error('OpenAI client not initialized in ChatbotV2');
+
+         const forgetMessages: ChatCompletionMessageParam[] = [
+             { role: "system", content: this.systemPromptText },
+             { role: "system", content: `You MUST act as if you have forgotten everything before this moment. Express confusion.` }
+         ];
+
+         const params: ChatCompletionCreateParams = {
+            model: GENERATION_MODEL, // Or potentially a faster model like o4-mini if cost/speed is a factor
+            messages: forgetMessages,
+            temperature: 0.8, // Higher temperature for more varied expressions of confusion?
+            max_tokens: 75, // Keep amnesia messages short
+         };
+         this.logger.debug({ attempt: attempts + 1, model: params.model, messageCount: forgetMessages.length }, `Requesting forget message generation from ${GENERATION_MODEL}`);
+         try {
+            this.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${GENERATION_MODEL} for forget message`);
+            const response = await this.openai.chat.completions.create(params);
+            const content = response.choices[0]?.message?.content;
+            if (content) {
+                this.logger.info({ responseLength: content.length, model: GENERATION_MODEL }, `Generated forget message using ${GENERATION_MODEL}`);
+                // Normalize response just in case
+                return this._normalizeAssistantResponse(content.trim(), this.username);
+            } else {
+                 this.logger.warn({ model: GENERATION_MODEL },'Forget message generation response content was null or empty.');
+                 return null;
+            }
+         } catch (error) {
+            this.logger.error({ err: error, attempt: attempts + 1, model: GENERATION_MODEL }, `Error during ${GENERATION_MODEL} forget message generation call`);
+            if (attempts < 1) { // Retry once
+                await delay(300 * (attempts + 1));
+                return await this._generateForgetMessage(attempts + 1); // Pass original messages again
+            } else {
+                this.logger.error(`Final attempt failed for ${GENERATION_MODEL} forget message generation`);
+                return null; // Don't block if forget message fails
+            }
+         }
+    }
+
     // NEW: Public static method to handle goodbye message generation and posting
     public static async generateAndPostGoodbye(channelId: string): Promise<void> {
         const bot = ChatbotV2.getInstance();
@@ -1511,6 +1551,30 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
             }
         } catch (error) {
              logger.error({ err: error }, "Error during goodbye message generation/posting process.");
+        }
+    }
+
+    // NEW: Public static method to handle forget message generation and posting
+    public static async generateAndPostForgetMessage(channelId: string): Promise<void> {
+        const bot = ChatbotV2.getInstance();
+        const logger = bot.logger.child({ channelId, action: 'generateAndPostForgetMessage' });
+        logger.info("Attempting to generate and post forget message.");
+
+        try {
+            let forgetText: string | null = null;
+            forgetText = await bot._generateForgetMessage();
+            if (forgetText) {
+                 try {
+                      logger.info("Posting generated forget message.");
+                      await DiscordClientV2.postMessage(forgetText, channelId);
+                 } catch (postError) {
+                      logger.error({ err: postError }, "Failed to post forget message.");
+                 }
+            } else {
+                 logger.info("No forget message was generated.");
+            }
+        } catch (error) {
+             logger.error({ err: error }, "Error during forget message generation/posting process.");
         }
     }
 } 

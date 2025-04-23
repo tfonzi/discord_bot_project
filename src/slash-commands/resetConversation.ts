@@ -33,10 +33,9 @@ export const ResetConversation: Command = {
         // Check if chat was active before reset and send a message if so
         if (ChatbotV2.getChatActiveState(channelId)) {
             logger.info('Chat was active, sending reset message.');
-            // Use DiscordClientV2.startTyping/stopTyping and ChatbotV2 handler
             try {
                 // Send message through the chatbot handler to ensure it's added to the (now empty) history
-                await ChatbotV2.handleIncomingDiscordMessage(channelId, "", ChatbotV2.getUsername(), "My recent memory has just been wiped! Dazed and confused, I say:");
+                await ChatbotV2.generateAndPostForgetMessage(channelId);
             } catch (error) {
                 logger.error({ err: error }, "Failed to send reset confirmation message via Chatbot.");
             }
