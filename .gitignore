@@ -1,13 +1,41 @@
+# Environment & Secrets
 .env
 env*
 .context
-node_modules/*
-dist/*
-notes/*
-*.txt
-redis-volume/*
-docker-test.sh
-*.pem
 .tokens
+*.pem
+# *.tfvars # Often contains secrets, add if necessary. terraform.tfvars is sometimes committed.
+*.auto.tfvars
+*.auto.tfvars.json
+
+redisData
+
+# Node.js
+node_modules/
+dist/
+.swc/
+
+# Logs
 *.log
-.swc/*
+logs/*
+botLogs/*
+crash.log
+crash.*.log # Terraform crash log files
+
+# Local data/configs
+redis-volume/
+notes/
+*.txt
+docker-test.sh
+
+# Terraform Core Files
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

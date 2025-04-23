@@ -12,7 +12,8 @@
     "docker:logs": "docker compose logs -f",
     "docker:up-logs": "docker compose up -d && docker compose logs -f",
     "docker:rebuild": "docker compose up -d --build",
-    "docker:rebuild-logs": "docker compose up -d --build && docker compose logs -f"
+    "docker:rebuild-logs": "docker compose up -d --build && docker compose logs -f",
+    "ssh": "ssh -i \"discord-bot-key-pair.pem\" ec2-user@54.87.91.186"
   },
   "dependencies": {
     "async-mutex": "^0.4.0",

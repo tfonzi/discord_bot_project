@@ -23,7 +23,7 @@ async function chatListenerV2(msg: Message<boolean>) {
         // Pass necessary info to the ChatbotV2 handler
         await ChatbotV2.handleIncomingDiscordMessage(msg.channelId, msg.id, msg.author.username, msg.content, imageUrls);
     } else {
-        logger.trace({ author: msg.author.tag, isBot: msg.author.bot, isActive: ChatbotV2.getChatActiveState(msg.channelId), startsWithSlash: msg.content.startsWith("/") }, "Ignoring message.");
+        //logger.trace({ author: msg.author.tag, isBot: msg.author.bot, isActive: ChatbotV2.getChatActiveState(msg.channelId), startsWithSlash: msg.content.startsWith("/") }, "Ignoring message.");
     }
 };
 
