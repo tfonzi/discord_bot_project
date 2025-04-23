@@ -133,14 +133,14 @@ mkdir -p /home/ec2-user/discord_bot_project/redis-volume
 chown ec2-user:ec2-user /home/ec2-user/discord_bot_project/redis-volume
 
 # retrieve redis backup if it exists
-aws s3 cp s3://${s3_bucket_name}/hourly/embeddings.aof /home/ec2-user/discord_bot_project/redis-volume/embeddings.aof --region $REGION || echo "Failed to retrieve hourly backup, continuing..."
-chown ec2-user:ec2-user /home/ec2-user/discord_bot_project/redis-volume/embeddings.aof
+aws s3 cp s3://${s3_bucket_name}/hourly/appendonlydir/ /home/ec2-user/discord_bot_project/redis-volume/appendonlydir/ --recursive --region $REGION || echo "Failed to retrieve hourly backup, continuing..."
+chown -R ec2-user:ec2-user /home/ec2-user/discord_bot_project/redis-volume/appendonlydir
 
 # set up cron
 yum -y install cronie
 
-CRON_CMD_HOURLY="0 * * * *  /usr/bin/aws s3 cp /home/ec2-user/discord_bot_project/redis-volume/embeddings.aof s3://${s3_bucket_name}/hourly/embeddings.aof --region $REGION"
-CRON_CMD_DAILY="0 4 * * *  /usr/bin/aws s3 cp /home/ec2-user/discord_bot_project/redis-volume/embeddings.aof s3://${s3_bucket_name}/daily/embeddings.aof --region $REGION"
+CRON_CMD_HOURLY="0 * * * *  /usr/bin/aws s3 cp /home/ec2-user/discord_bot_project/redis-volume/appendonlydir/ s3://${s3_bucket_name}/hourly/appendonlydir/ --recursive --region $REGION"
+CRON_CMD_DAILY="0 4 * * *  /usr/bin/aws s3 cp /home/ec2-user/discord_bot_project/redis-volume/appendonlydir/ s3://${s3_bucket_name}/daily/appendonlydir/ --recursive --region $REGION"
 
 # Add cron jobs for ec2-user
 (crontab -u ec2-user -l 2>/dev/null || true; echo "$CRON_CMD_HOURLY") | crontab -u ec2-user -
