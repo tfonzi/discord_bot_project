@@ -788,30 +788,33 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
 
                         if (imagePrompt) {
                             logger.info({ imagePrompt }, `Generated image prompt using ${GENERATION_MODEL}`);
-                            imageUrl = await ChatbotV2.generateImage(imagePrompt); // Uses DALL-E 3 constant
+                            // UPDATED: Call generateImage which now returns b64_json
+                            const imageB64Json = await ChatbotV2.generateImage(imagePrompt); // Uses DALL-E 3 constant
 
-                            if (imageUrl) {
-                                logger.info({ imageUrl }, 'Image generated, attempting to fetch and post');
-                                const attachment = await bot._fetchImageAsAttachment(imageUrl);
-                                if (attachment) {
+                            if (imageB64Json) {
+                                logger.info('Image generated (b64_json), attempting to create attachment and post');
+                                // UPDATED: Create buffer directly from base64
+                                try {
+                                    const buffer = Buffer.from(imageB64Json, 'base64');
+                                    const attachment = new AttachmentBuilder(buffer, { name: 'generated_image.png' });
                                     await DiscordClientV2.postImage(attachment, channelId);
                                     logger.info('Successfully posted generated image to Discord.');
 
                                     // Construct ProcessedMessage for assistant image post
+                                    // Store prompt, not the large b64 data or a URL
                                     const assistantMessage: ProcessedMessage = {
                                         messageId: "",
                                         user: bot.username,
                                         text: `Assistant generated an image with prompt: ${imagePrompt || '(prompt unavailable)'}`,
-                                        imageUrls: [imageUrl]
+                                        // No imageUrls needed here
                                     };
                                     history.addMessage(assistantMessage); // Add image post info to history
-
-                                } else {
-                                    logger.error('Failed to fetch image or create attachment from URL.');
-                                    await DiscordClientV2.postMessage("I generated an image, but couldn't post it. Sorry!", channelId);
+                                } catch (bufferError) {
+                                    logger.error({ err: bufferError }, 'Failed to create buffer/attachment from b64_json.');
+                                    await DiscordClientV2.postMessage("I generated an image, but couldn't process the data to post it. Sorry!", channelId);
                                 }
                             } else {
-                                logger.error('Image generation call returned no URL.');
+                                logger.error('Image generation call returned no b64_json data.');
                                 await DiscordClientV2.postMessage("I tried to generate an image, but something went wrong with the generation step.", channelId);
                             }
                         } else {
@@ -1054,19 +1057,21 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
              model: IMAGE_GENERATION_MODEL,
              prompt: prompt,
              n: 1, // Generate one image
-             size: "1024x1024" // Explicitly use allowed literal type
+             size: "1024x1024", // Explicitly use allowed literal type
+             response_format: "b64_json" // UPDATED: Request base64 data
         };
-        bot.logger.info({ model: params.model, prompt: params.prompt, n: params.n, size: params.size, attempt: attempts + 1 }, `Requesting image generation from ${IMAGE_GENERATION_MODEL}`);
+        bot.logger.info({ model: params.model, prompt: params.prompt, n: params.n, size: params.size, response_format: params.response_format, attempt: attempts + 1 }, `Requesting image generation from ${IMAGE_GENERATION_MODEL}`); // Log response_format
         try {
             bot.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${IMAGE_GENERATION_MODEL} for image generation`); // Add trace log
             const response = await bot.openai.images.generate(params);
-            const imageUrl = response.data[0]?.url;
-            if (imageUrl) {
-                bot.logger.info({ imageUrl, model: IMAGE_GENERATION_MODEL }, `Received image generation response from ${IMAGE_GENERATION_MODEL}`);
+            // UPDATED: Access b64_json field
+            const imageB64Json = response.data[0]?.b64_json;
+            if (imageB64Json) {
+                bot.logger.info({ model: IMAGE_GENERATION_MODEL }, `Received image generation response (b64_json) from ${IMAGE_GENERATION_MODEL}`);
             } else {
-                bot.logger.warn({ model: IMAGE_GENERATION_MODEL }, 'Image generation response did not contain a URL.');
+                bot.logger.warn({ model: IMAGE_GENERATION_MODEL }, 'Image generation response did not contain b64_json data.');
             }
-            return imageUrl || null;
+            return imageB64Json || null; // Return the base64 string or null
         } catch (error) {
             bot.logger.error({ err: error, prompt: params.prompt, model: IMAGE_GENERATION_MODEL, attempt: attempts + 1 }, `Error during ${IMAGE_GENERATION_MODEL} image generation call`);
              if (attempts < 2) {

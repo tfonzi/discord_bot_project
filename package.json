@@ -13,7 +13,7 @@
     "docker:up-logs": "docker compose up -d && docker compose logs -f",
     "docker:rebuild": "docker compose up -d --build",
     "docker:rebuild-logs": "docker compose up -d --build && docker compose logs -f",
-    "ssh": "ssh -i \"discord-bot-key-pair.pem\" ec2-user@54.88.214.125"
+    "ssh": "ssh -i \"discord-bot-key-pair.pem\" ec2-user@174.129.129.247"
   },
   "dependencies": {
     "async-mutex": "^0.4.0",
@@ -22,7 +22,7 @@
     "dotenv": "^16.3.1",
     "emojilib": "^4.0.1",
     "gpt-3-encoder": "^1.1.4",
-    "openai": "^4.95.0",
+    "openai": "^4.96.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
     "redis": "^4.6.13",
