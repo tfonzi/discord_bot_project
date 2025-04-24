@@ -1058,9 +1058,8 @@ You MUST use the 'extract_conversation_memories' tool to return these memories. 
              prompt: prompt,
              n: 1, // Generate one image
              size: "1024x1024", // Explicitly use allowed literal type
-             response_format: "b64_json" // UPDATED: Request base64 data
         };
-        bot.logger.info({ model: params.model, prompt: params.prompt, n: params.n, size: params.size, response_format: params.response_format, attempt: attempts + 1 }, `Requesting image generation from ${IMAGE_GENERATION_MODEL}`); // Log response_format
+        bot.logger.info({ model: params.model, prompt: params.prompt, n: params.n, size: params.size, attempt: attempts + 1 }, `Requesting image generation from ${IMAGE_GENERATION_MODEL}`); // Log response_format
         try {
             bot.logger.trace({ openAIParams: params }, `Making OpenAI API call to ${IMAGE_GENERATION_MODEL} for image generation`); // Add trace log
             const response = await bot.openai.images.generate(params);
